@@ -20,6 +20,7 @@ import { citasRangoRouter }     from "./routes/citas-rango.js";
 import { proximasRouter }       from "./routes/proximas.js";
 import { bloquearDiaRouter }    from "./routes/bloquear-dia.js";
 import { diasBloqueadosRouter } from "./routes/dias-bloqueados-list.js";
+import { webhookRouter }        from "./routes/webhook.js";
 
 const app = express();
 
@@ -52,6 +53,9 @@ app.use("/api/proximas",          proximasRouter);
 app.use("/api/bloquear-dia",      bloquearDiaRouter);
 app.use("/api/dias-bloqueados",   diasBloqueadosRouter);
 
+// Webhook de Telegram (sin autenticación por API key)
+app.use("/webhook", webhookRouter);
+
 // ── Manejo de errores ────────────────────────────────────────
 app.use(notFound);
 app.use(errorHandler);
@@ -64,3 +68,4 @@ app.listen(ENV.PORT, () => {
 });
 
 export default app;
+
