@@ -1,13 +1,9 @@
-// ================================================================
-// flujo.ts — Lógica principal del bot.
-// ================================================================
 import { BotSesion } from "./types.js";
 import { DOCTORES } from "./config.js";
 import { getSesion, setSesion, deleteSesion } from "./sesion.js";
 import { enviar, enviarConBotones, quitarTeclado } from "./telegram.js";
 import { rpc, supabase } from "../lib/supabase.js";
 import { normalizeTelefono } from "../lib/dates.js";
-import { ENV } from "../lib/env.js";
 import {
   interpretarTipoConsulta,
   extraerNombre,
@@ -79,9 +75,15 @@ export async function procesarMensaje(chatId: string, texto: string): Promise<vo
 }
 
 async function mostrarInicio(chatId: string): Promise<void> {
-  const botones = DOCTORES.map((d, i) => [`${i + 1}. ${d.nombre} — ${d.especialidad}`]);
+  const lista = DOCTORES.map((d, i) => `${i + 1}️⃣ *${d.nombre}* — ${d.especialidad}`).join("\n");
+  const botones = DOCTORES.map((d, i) => [`${i + 1}. ${d.nombre}`]);
   botones.push(["❌ Cancelar una cita"]);
-  await enviarConBotones(chatId, "👋 ¡Hola! Soy el asistente de citas médicas.\n\n¿Con qué doctor te puedo ayudar hoy?", botones);
+
+  await enviarConBotones(
+    chatId,
+    `👋 ¡Hola! Soy el asistente de citas médicas.\n\n¿Con qué doctor te puedo ayudar hoy?\n\n${lista}\n\nEscribe el número o toca una opción 👇`,
+    botones,
+  );
   await setSesion(chatId, { paso: "elegir_doctor" });
 }
 
@@ -105,15 +107,18 @@ async function manejarDoctor(chatId: string, texto: string, sesion: BotSesion): 
   }
 
   if (doctorIdx === -1) {
+    const lista = DOCTORES.map((d, i) => `${i + 1}️⃣ *${d.nombre}*`).join("\n");
     const botones = DOCTORES.map((d, i) => [`${i + 1}. ${d.nombre}`]);
-    await enviarConBotones(chatId, "No reconocí esa opción 😅 Elige un número:", botones);
+    await enviarConBotones(chatId, `No reconocí esa opción 😅\n\n${lista}\n\nEscribe el número:`, botones);
     return;
   }
 
   const doctor = DOCTORES[doctorIdx]!;
   await setSesion(chatId, { ...sesion, paso: "elegir_sede", doctor_nombre: doctor.nombre });
-  const botones = doctor.sedes.map((s, i) => [`${i + 1}. ${s.ciudad} — ${s.nombre}`]);
-  await enviarConBotones(chatId, `✅ *${doctor.nombre}*\n\n📍 ¿En qué sede te queda mejor?`, botones);
+
+  const lista = doctor.sedes.map((s, i) => `${i + 1}️⃣ ${s.ciudad} — ${s.nombre}`).join("\n");
+  const botones = doctor.sedes.map((s, i) => [`${i + 1}. ${s.ciudad}`]);
+  await enviarConBotones(chatId, `✅ *${doctor.nombre}*\n\n📍 ¿En qué sede te queda mejor?\n\n${lista}\n\nEscribe el número 👇`, botones);
 }
 
 async function manejarSede(chatId: string, texto: string, sesion: BotSesion): Promise<void> {
@@ -132,20 +137,29 @@ async function manejarSede(chatId: string, texto: string, sesion: BotSesion): Pr
   }
 
   if (sedeIdx === -1) {
+    const lista = doctor.sedes.map((s, i) => `${i + 1}️⃣ ${s.ciudad}`).join("\n");
     const botones = doctor.sedes.map((s, i) => [`${i + 1}. ${s.ciudad}`]);
-    await enviarConBotones(chatId, "No reconocí esa sede 😅 Elige un número:", botones);
+    await enviarConBotones(chatId, `No reconocí esa sede 😅\n\n${lista}\n\nEscribe el número:`, botones);
     return;
   }
 
   const sede = doctor.sedes[sedeIdx]!;
   await setSesion(chatId, { ...sesion, paso: "tipo_consulta", sede_id: sede.dc_id, sede_nombre: `${sede.nombre} (${sede.ciudad})` });
-  await enviarConBotones(chatId, `✅ *${sede.nombre}*\n\n¿Es tu primera vez con el doctor o es una consulta de seguimiento?`, [["✅ Primera vez"], ["🔄 Seguimiento"]]);
+  await enviarConBotones(
+    chatId,
+    `✅ *${sede.nombre}*\n\n¿Es tu primera vez con el doctor o es seguimiento?\n\n1️⃣ Primera vez\n2️⃣ Seguimiento`,
+    [["1. Primera vez"], ["2. Seguimiento"]],
+  );
 }
 
 async function manejarTipoConsulta(chatId: string, texto: string, sesion: BotSesion): Promise<void> {
   const tipo = await interpretarTipoConsulta(texto);
   if (!tipo) {
-    await enviarConBotones(chatId, "No entendí bien 😅 ¿Es tu primera vez o es seguimiento?", [["✅ Primera vez"], ["🔄 Seguimiento"]]);
+    await enviarConBotones(
+      chatId,
+      "No entendí bien 😅\n\n1️⃣ Primera vez\n2️⃣ Seguimiento\n\nEscribe el número:",
+      [["1. Primera vez"], ["2. Seguimiento"]],
+    );
     return;
   }
 
@@ -165,7 +179,7 @@ async function manejarNombre(chatId: string, texto: string, sesion: BotSesion): 
     return;
   }
   await setSesion(chatId, { ...sesion, paso: "telefono", nombre });
-  await enviar(chatId, `Perfecto, *${nombre}* 👍\n\n📞 ¿Cuál es tu número de teléfono?`);
+  await enviar(chatId, `Perfecto, *${nombre}* 👍\n\n📞 ¿Cuál es tu número de teléfono? (ej: 8091234567)`);
 }
 
 async function manejarTelefono(chatId: string, texto: string, sesion: BotSesion): Promise<void> {
@@ -176,7 +190,7 @@ async function manejarTelefono(chatId: string, texto: string, sesion: BotSesion)
   }
   const telefono = normalizeTelefono(telRaw);
   await setSesion(chatId, { ...sesion, paso: "motivo", telefono });
-  await enviar(chatId, "🩺 ¿Cuál es el motivo de tu consulta?\n\n_(Puedes escribirlo en tus propias palabras)_");
+  await enviar(chatId, "🩺 ¿Cuál es el motivo de tu consulta?\n\n_(Escríbelo con tus propias palabras)_");
 }
 
 async function manejarMotivo(chatId: string, texto: string, sesion: BotSesion): Promise<void> {
@@ -198,8 +212,9 @@ async function manejarMotivo(chatId: string, texto: string, sesion: BotSesion): 
   }
 
   await setSesion(chatId, { ...sesion, paso: "elegir_dia", motivo: texto, dias_disponibles: dias });
-  const botones = dias.map((d: any, i: number) => [`${i + 1}. ${formatFecha(d.fecha)} — ${d.total_slots} horarios`]);
-  await enviarConBotones(chatId, "📅 Estos son los días disponibles:\n\n¿Cuál te viene mejor?", botones);
+  const lista = dias.map((d: any, i: number) => `${i + 1}️⃣ ${formatFecha(d.fecha)} — ${d.total_slots} horarios`).join("\n");
+  const botones = dias.map((d: any, i: number) => [`${i + 1}. ${formatFecha(d.fecha)}`]);
+  await enviarConBotones(chatId, `📅 Estos son los días disponibles:\n\n${lista}\n\n¿Cuál te viene mejor? Escribe el número 👇`, botones);
 }
 
 async function manejarElegirDia(chatId: string, texto: string, sesion: BotSesion): Promise<void> {
@@ -207,8 +222,9 @@ async function manejarElegirDia(chatId: string, texto: string, sesion: BotSesion
   const num  = parseInt(texto) - 1;
 
   if (isNaN(num) || num < 0 || num >= dias.length) {
+    const lista = dias.map((d: any, i: number) => `${i + 1}️⃣ ${formatFecha(d.fecha)}`).join("\n");
     const botones = dias.map((d: any, i: number) => [`${i + 1}. ${formatFecha(d.fecha)}`]);
-    await enviarConBotones(chatId, `Elige un número del 1 al ${dias.length}:`, botones);
+    await enviarConBotones(chatId, `Elige un número del 1 al ${dias.length}:\n\n${lista}`, botones);
     return;
   }
 
@@ -231,8 +247,9 @@ async function manejarElegirDia(chatId: string, texto: string, sesion: BotSesion
   const slots = slotsRaw.slice(0, 8).map((s: any) => ({ inicia_en: s.inicia_en, hora: toHoraRD(s.inicia_en) }));
   await setSesion(chatId, { ...sesion, paso: "elegir_hora", fecha_sel: fechaSel, slots });
 
+  const lista = slots.map((s: any, i: number) => `${i + 1}️⃣ ${s.hora}`).join("\n");
   const botones = slots.map((s: any, i: number) => [`${i + 1}. ${s.hora}`]);
-  await enviarConBotones(chatId, `⏰ Mira los horarios para *${formatFecha(fechaSel)}*:\n\nElige el que te funcione mejor y yo me encargo 😉`, botones);
+  await enviarConBotones(chatId, `⏰ Horarios disponibles para *${formatFecha(fechaSel)}*:\n\n${lista}\n\nElige el que te funcione mejor 😉`, botones);
 }
 
 async function manejarElegirHora(chatId: string, texto: string, sesion: BotSesion): Promise<void> {
@@ -240,15 +257,15 @@ async function manejarElegirHora(chatId: string, texto: string, sesion: BotSesio
   const num   = parseInt(texto) - 1;
 
   if (isNaN(num) || num < 0 || num >= slots.length) {
+    const lista = slots.map((s: any, i: number) => `${i + 1}️⃣ ${s.hora}`).join("\n");
     const botones = slots.map((s: any, i: number) => [`${i + 1}. ${s.hora}`]);
-    await enviarConBotones(chatId, `Elige un número del 1 al ${slots.length}:`, botones);
+    await enviarConBotones(chatId, `Elige un número del 1 al ${slots.length}:\n\n${lista}`, botones);
     return;
   }
 
   const slotSel = slots[num]!;
   await setSesion(chatId, { ...sesion, paso: "confirmar", slot_sel: slotSel });
 
-  const tipoTxt = sesion.es_primera ? "Primera vez" : "Seguimiento";
   await enviarConBotones(
     chatId,
     `📋 *Revisa tu cita antes de confirmar:*\n\n` +
@@ -257,7 +274,7 @@ async function manejarElegirHora(chatId: string, texto: string, sesion: BotSesio
     `🏥 ${sesion.sede_nombre}\n` +
     `📅 ${formatFecha(sesion.fecha_sel!)} a las *${slotSel.hora}*\n` +
     `🩺 ${sesion.motivo}\n` +
-    `📋 ${tipoTxt}\n\n` +
+    `📋 ${sesion.es_primera ? "Primera vez" : "Seguimiento"}\n\n` +
     `¿Todo está bien? 👇`,
     [["✅ Sí, confirmar"], ["❌ Cancelar"]],
   );
