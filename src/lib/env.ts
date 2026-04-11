@@ -2,9 +2,6 @@
 // env.ts — Valida que todas las variables necesarias existen.
 // Si falta una, el servidor no arranca y te dice exactamente cuál.
 // ================================================================
-
-// Node 20+ tiene soporte nativo para .env con --env-file,
-// pero para compatibilidad universal lo leemos manualmente.
 import fs from "fs";
 import path from "path";
 
@@ -37,9 +34,11 @@ function require_env(name: string): string {
 }
 
 export const ENV = {
-  SUPABASE_URL: require_env("SUPABASE_URL"),
-  SUPABASE_KEY: require_env("SUPABASE_KEY"),
-  API_SECRET:   require_env("API_SECRET"),
-  TIMEZONE:     process.env["TIMEZONE"] ?? "America/Santo_Domingo",
-  PORT:         parseInt(process.env["PORT"] ?? "3000", 10),
+  SUPABASE_URL:       require_env("SUPABASE_URL"),
+  SUPABASE_KEY:       require_env("SUPABASE_KEY"),
+  API_SECRET:         require_env("API_SECRET"),
+  TELEGRAM_BOT_TOKEN: require_env("TELEGRAM_BOT_TOKEN"),
+  CLAUDE_API_KEY:     require_env("CLAUDE_API_KEY"),
+  TIMEZONE:           process.env["TIMEZONE"] ?? "America/Santo_Domingo",
+  PORT:               parseInt(process.env["PORT"] ?? "3000", 10),
 };
