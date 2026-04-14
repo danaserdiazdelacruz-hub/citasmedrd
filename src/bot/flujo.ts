@@ -1,4 +1,3 @@
-
 import { getSesion, setSesion, deleteSesion } from "./sesion.js";
 import { enviar } from "./telegram.js";
 import { rpc, supabase } from "../lib/supabase.js";
@@ -110,6 +109,7 @@ async function buscarSlots(dcId: string, srvId: string, fecha: string): Promise<
       if (fecha !== hoy) return true;
       return new Date(new Date(s.inicia_en).toLocaleString("en-US", { timeZone: "America/Santo_Domingo" })) > ahora;
     })
+    .slice(0, 10) // Max 10 slots shown
     .map((s: any, i: number) => ({ num: i + 1, hora: horaRD(s.inicia_en), inicia_en: s.inicia_en }));
 }
 
@@ -134,16 +134,21 @@ async function agendarCita(s: BotSesion, slot: SlotResumen): Promise<string | nu
 // Sede matching — by number, name, or city
 // ──────────────────────────────────────────────────────────
 
+/** Remove accents for matching: jimaní → jimani */
+function noAccent(s: string): string {
+  return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+
 function matchSede(texto: string, sedes: SedeResumen[]): SedeResumen | undefined {
-  const tl = texto.toLowerCase().trim();
+  const tl = noAccent(texto.toLowerCase().trim());
   const num = parseInt(tl) - 1;
   if (!isNaN(num) && num >= 0 && num < sedes.length) return sedes[num];
   return sedes.find(s => {
-    const n = s.clinicas?.nombre?.toLowerCase() ?? "";
-    const c = s.clinicas?.ciudad?.toLowerCase() ?? "";
+    const n = noAccent(s.clinicas?.nombre?.toLowerCase() ?? "");
+    const c = noAccent(s.clinicas?.ciudad?.toLowerCase() ?? "");
     if (n.includes(tl) || tl.includes(n)) return true;
     const words = tl.split(/\s+/).filter(w => w.length >= 3);
-    if (words.length > 0 && words.every(w => n.includes(w))) return true;
+    if (words.length > 0 && words.every(w => n.includes(w) || c.includes(w))) return true;
     if (c.includes(tl) || tl.includes(c)) return true;
     return false;
   });
@@ -183,18 +188,25 @@ function matchSlot(texto: string, slots: SlotResumen[]): SlotResumen | undefined
 // ──────────────────────────────────────────────────────────
 
 function matchDia(texto: string, dias: { fecha: string; total_slots: number }[]): { fecha: string; total_slots: number } | undefined {
-  const tl = texto.trim();
-  const num = parseInt(tl);
+  const tl = texto.trim().toLowerCase();
+
+  // Extract any number from the text: "martes 14" → 14, "el 17" → 17, "1" → 1
+  const numMatch = tl.match(/\d+/);
+  if (!numMatch) return undefined;
+  const num = parseInt(numMatch[0]);
   if (isNaN(num)) return undefined;
 
-  // First: try as option index (1-5)
+  // If small number (1-5) and within list range, treat as option index
+  if (num >= 1 && num <= dias.length && num <= 5) return dias[num - 1];
+
+  // Otherwise treat as day-of-month
+  const byDay = dias.find(d => parseInt(d.fecha.split("-")[2]!) === num);
+  if (byDay) return byDay;
+
+  // Last resort: if within list range, use as index
   if (num >= 1 && num <= dias.length) return dias[num - 1];
 
-  // Second: try as day-of-month (13, 14, 17, 20, etc.)
-  return dias.find(d => {
-    const day = parseInt(d.fecha.split("-")[2]!);
-    return day === num;
-  });
+  return undefined;
 }
 
 // ──────────────────────────────────────────────────────────
@@ -282,8 +294,13 @@ export async function procesarMensaje(chatId: string, texto: string): Promise<vo
 
   // Waiting for cancellation code
   if (ses.paso === "esperando_codigo_cancelar") {
-    let code = texto.trim().toUpperCase();
-    if (!code.startsWith("CITA-")) code = "CITA-" + code;
+    // Extract just the code part, stripping "cita", "cita-", spaces
+    let code = texto.trim().toUpperCase().replace(/^CITA[\s-]*/i, "").replace(/\s+/g, "");
+    if (code.length < 4) {
+      await enviar(chatId, "Código inválido. El formato es CITA-XXXXXX (6 caracteres). Intente de nuevo.");
+      return;
+    }
+    code = "CITA-" + code;
     const found = await supabase<any[]>("GET", "/rest/v1/citas", null, {
       codigo: `eq.${code}`, select: "id,estado", limit: "1",
     });
@@ -315,26 +332,32 @@ export async function procesarMensaje(chatId: string, texto: string): Promise<vo
     }
   }
 
-  // Direct name extraction: if text has a phone, everything before it is likely the name
+  // Direct name + motivo extraction from combined messages like "daniela 8098642498. bulto mamas"
   if (!ses.nombre && ses.doctor_id) {
     const phonePat = /\b(809|829|849)\d{7}\b/;
+    const medWords = new Set(["bulto","dolor","sangrado","flujo","ardor","chequeo","quiste","masa",
+      "nodulo","nódulo","biopsia","mama","mamas","seno","senos","papanicolaou","mamografia","screening",
+      "control","revision","seguimiento","consulta","tumor","cancer","cáncer","hpv","citologia"]);
+
     if (phonePat.test(texto)) {
-      // Text like "yessi cruz 8098247917" → name = "yessi cruz"
-      const namepart = texto.replace(phonePat, "").replace(/[+\d]/g, "").trim();
-      if (namepart.length >= 3 && !/^\d+$/.test(namepart)) {
-        ses.nombre = namepart.split(" ").map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ");
+      // "daniela 8098642498. bulto mamas" → strip phone, split by punctuation
+      const withoutPhone = texto.replace(phonePat, "").replace(/[+\d]/g, "");
+      // Split on period, comma, dash to separate name from motivo
+      const parts = withoutPhone.split(/[.,;-]+/).map(p => p.trim()).filter(p => p.length > 0);
+
+      for (const part of parts) {
+        const words = part.split(/\s+/).filter(w => w.length > 0);
+        const hasMedical = words.some(w => medWords.has(w.toLowerCase()));
+        if (!hasMedical && words.length >= 1 && words.every(w => /^[a-záéíóúñü]+$/i.test(w))) {
+          if (!ses.nombre) {
+            ses.nombre = words.map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ");
+          }
+        } else if (hasMedical && !ses.motivo) {
+          ses.motivo = part.trim();
+        }
       }
     } else if (datos.nombre) {
       ses.nombre = datos.nombre;
-    } else if (ses.sede_id && ses.es_primera !== undefined && !ses.motivo) {
-      // If we're collecting data and text looks like a name (2+ words, no numbers, no medical terms)
-      const words = texto.trim().split(/\s+/);
-      const medical = ["bulto","dolor","chequeo","sangrado","control","consulta","seguimiento","seno","senos","mama"];
-      const isName = words.length >= 2 && words.every(w => /^[a-záéíóúñü]+$/i.test(w))
-        && !words.some(w => medical.includes(w.toLowerCase()));
-      if (isName) {
-        ses.nombre = words.map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ");
-      }
     }
   }
 
