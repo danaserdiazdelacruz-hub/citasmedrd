@@ -1,3 +1,4 @@
+
 import { getSesion, setSesion, deleteSesion } from "./sesion.js";
 import { enviar } from "./telegram.js";
 import { rpc, supabase } from "../lib/supabase.js";
@@ -301,30 +302,57 @@ export async function procesarMensaje(chatId: string, texto: string): Promise<vo
 
   // ════════════════ EXTRACT PATIENT DATA ════════════════
   const datos = await extractData(texto);
-  if (datos.motivo && !ses.motivo) ses.motivo = datos.motivo;
-  if (datos.telefono && !ses.telefono) {
-    const t = telRD(datos.telefono);
-    if (t) ses.telefono = t;
+
+  // Direct phone detection FIRST (most reliable)
+  if (!ses.telefono) {
+    const phoneMatch = texto.match(/\b(809|829|849)\d{7}\b/);
+    if (phoneMatch) {
+      const t = telRD(phoneMatch[0]);
+      if (t) ses.telefono = t;
+    } else if (datos.telefono) {
+      const t = telRD(datos.telefono);
+      if (t) ses.telefono = t;
+    }
   }
 
-  // Direct detection of primera/seguimiento
+  // Direct name extraction: if text has a phone, everything before it is likely the name
+  if (!ses.nombre && ses.doctor_id) {
+    const phonePat = /\b(809|829|849)\d{7}\b/;
+    if (phonePat.test(texto)) {
+      // Text like "yessi cruz 8098247917" → name = "yessi cruz"
+      const namepart = texto.replace(phonePat, "").replace(/[+\d]/g, "").trim();
+      if (namepart.length >= 3 && !/^\d+$/.test(namepart)) {
+        ses.nombre = namepart.split(" ").map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ");
+      }
+    } else if (datos.nombre) {
+      ses.nombre = datos.nombre;
+    } else if (ses.sede_id && ses.es_primera !== undefined && !ses.motivo) {
+      // If we're collecting data and text looks like a name (2+ words, no numbers, no medical terms)
+      const words = texto.trim().split(/\s+/);
+      const medical = ["bulto","dolor","chequeo","sangrado","control","consulta","seguimiento","seno","senos","mama"];
+      const isName = words.length >= 2 && words.every(w => /^[a-záéíóúñü]+$/i.test(w))
+        && !words.some(w => medical.includes(w.toLowerCase()));
+      if (isName) {
+        ses.nombre = words.map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ");
+      }
+    }
+  }
+
+  // Direct primera/seguimiento detection
   if (ses.es_primera === undefined) {
     if (["primera","primera vez","primera consulta"].some(p => tl.includes(p))) ses.es_primera = true;
     else if (["seguimiento","control","revision","revisión","chequeo"].some(p => tl.includes(p))) ses.es_primera = false;
     else if (datos.es_primera !== undefined) ses.es_primera = datos.es_primera;
   }
 
-  // Direct phone detection from raw text
-  if (!ses.telefono) {
-    const phoneMatch = texto.match(/\b(809|829|849)\d{7}\b/);
-    if (phoneMatch) {
-      const t = telRD(phoneMatch[0]);
-      if (t) ses.telefono = t;
+  // Direct motivo detection for common medical terms
+  if (!ses.motivo && ses.sede_id) {
+    const medTerms = ["bulto","dolor","sangrado","flujo","ardor","picazón","irregularidad",
+      "quiste","masa","nódulo","biopsia","papanicolaou","mamografía","screening","revisión anual"];
+    if (medTerms.some(t => tl.includes(t)) || datos.motivo) {
+      ses.motivo = datos.motivo || texto.trim();
     }
   }
-
-  // Name — only set if doctor is already identified (prevents doctor name = patient name)
-  if (datos.nombre && !ses.nombre && ses.doctor_id) ses.nombre = datos.nombre;
 
   // ════════════════ FIND DOCTOR ════════════════
   if (!ses.doctor_id && !ses.doctores_multiples) {
@@ -533,8 +561,11 @@ export async function procesarMensaje(chatId: string, texto: string): Promise<vo
   }
 
   // ════════════════ AUTO-TRIGGER: ALL DATA READY → SEARCH SLOTS ════════════════
+  console.log(`[DATOS] sede=${!!ses.sede_id} srv=${!!ses.servicio_id} nombre="${ses.nombre ?? "?"}" tel=${!!ses.telefono} motivo="${ses.motivo ?? "?"}" paso=${ses.paso ?? "-"}`);
+
   if (ses.sede_id && ses.servicio_id && ses.nombre && ses.telefono && ses.motivo
       && ses.paso !== "elegir_dia" && ses.paso !== "elegir_hora") {
+    console.log("[AUTO-TRIGGER] ¡Todos los datos listos! Buscando disponibilidad...");
     const diasR = await rpc<any>("fn_dias_disponibles", {
       p_doctor_clinica_id: ses.sede_id, p_servicio_id: ses.servicio_id,
       p_dias_adelante: 14, p_max_resultados: 5,
@@ -559,6 +590,7 @@ export async function procesarMensaje(chatId: string, texto: string): Promise<vo
 
   // ════════════════ COLLECT REMAINING DATA VIA CLAUDE ════════════════
   // Only reaches here if some data is missing (name, phone, motive, type)
+  console.log(`[CLAUDE FALLBACK] Datos faltantes — entrando a conversación`);
 
   let pendientes: string[] = [];
   if (ses.sede_id && ses.es_primera === undefined) pendientes.push("tipo de consulta (primera vez o seguimiento)");
