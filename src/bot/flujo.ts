@@ -4,11 +4,10 @@ import { rpc, supabase } from "../lib/supabase.js";
 import { ENV } from "../lib/env.js";
 import { BOT_BIENVENIDA } from "./config.js";
 import { BotSesion, SedeResumen, ServicioResumen, SlotResumen } from "./types.js";
-import { detectarIntencionCancelar } from "./claude-ai.js";
 
-// ──────────────────────────────────────────────────────────
-// Helpers de formato
-// ──────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════
+// HELPERS
+// ══════════════════════════════════════════════════════════
 
 const DIAS  = ["Dom","Lun","Mar","Mié","Jue","Vie","Sáb"];
 const MESES = ["","ene","feb","mar","abr","may","jun","jul","ago","sep","oct","nov","dic"];
@@ -44,9 +43,31 @@ function validarTelefonoRD(tel: string): string | null {
   return "+1" + numero;
 }
 
-// ──────────────────────────────────────────────────────────
-// Consultas a Supabase
-// ──────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════
+// DETECCIÓN DE INTENCIÓN (sin depender de Claude)
+// ══════════════════════════════════════════════════════════
+
+function esIntencionCancelar(texto: string): boolean {
+  const t = texto.toLowerCase();
+  const palabrasCancelar = [
+    "cancelar", "cancela", "anular", "anula", "eliminar", 
+    "quitar", "borrar", "sacar", "puedo cancelar", "quiero cancelar",
+    "necesito cancelar", "deseo cancelar", "cancelacion", "cancelación",
+    "no puedo ir", "no ire", "no iré", "no asistire", "no asistiré"
+  ];
+  return palabrasCancelar.some(p => t.includes(p));
+}
+
+function extraerCodigoCita(texto: string): string | null {
+  // Busca CITA-XXXX o solo XXXX (4-8 caracteres alfanuméricos)
+  const match = texto.match(/(CITA-)?([A-Z0-9]{4,8})/i);
+  if (match) return (match[1] || "CITA-") + match[2]!.toUpperCase();
+  return null;
+}
+
+// ══════════════════════════════════════════════════════════
+// SUPABASE
+// ══════════════════════════════════════════════════════════
 
 async function buscarDoctor(texto: string): Promise<any | null> {
   const clean = texto.trim();
@@ -83,10 +104,10 @@ async function buscarDoctorAgresivo(texto: string): Promise<any | null> {
   for (const palabra of palabras) {
     const skip = ["que","quien","quién","cual","cuál","como","cómo","con","por","para",
       "los","las","del","una","uno","ese","esa","doctor","doctora","dra","quiero",
-      "busca","buscar","deseo","necesito","tiene","donde","esta","nombre",
-      "extension","consulta","cita","agendar","ver","saber","información","info",
-      "favor","puede","podria","quiere","hola","buenas","buenos","dias",
-      "tienes","acceso","base","datos","cancelar"];
+      "busca","buscar","deseo","necesito","donde","esta","nombre",
+      "extension","consulta","cita","agendar","ver","saber","info",
+      "favor","puede","podria","hola","buenas","buenos","dias",
+      "tienes","acceso","base","datos","cancelar","puedo","tengo","una"];
     if (skip.includes(palabra.toLowerCase())) continue;
     resultado = await buscarDoctor(palabra);
     if (resultado) return resultado;
@@ -136,9 +157,8 @@ async function buscarSlots(dcId: string, srvId: string, fecha: string): Promise<
     inicia_en: s.inicia_en,
   }));
 
-  if (slots.length === 0) return { texto: "No hay horarios disponibles para ese día.", slots: [] };
-  const texto = slots.map(s => `${s.num}. ${s.hora}`).join("\n");
-  return { texto, slots };
+  if (slots.length === 0) return { texto: "No hay horarios disponibles.", slots: [] };
+  return { texto: slots.map(s => `${s.num}. ${s.hora}`).join("\n"), slots };
 }
 
 async function agendarCita(sesion: BotSesion, slot: SlotResumen): Promise<string | null> {
@@ -156,25 +176,24 @@ async function agendarCita(sesion: BotSesion, slot: SlotResumen): Promise<string
     p_paciente_id: pac.data[0].paciente_id,
     p_servicio_id: sesion.servicio_id,
     p_inicia_en: slot.inicia_en,
-    p_motivo: sesion.motivo ?? "Consulta medica",
+    p_motivo: sesion.motivo ?? "Consulta",
     p_canal: "telegram",
     p_creado_por: null,
   });
 
-  if (!cita.data?.[0]?.exito) return null;
-  return cita.data[0].codigo;
+  return cita.data?.[0]?.exito ? cita.data[0].codigo : null;
 }
 
-async function cancelarCitaPorCodigo(codigo: string): Promise<{exito: boolean; mensaje: string}> {
-  let codigoNormalizado = codigo.toUpperCase().trim();
-  if (!codigoNormalizado.startsWith("CITA-")) codigoNormalizado = "CITA-" + codigoNormalizado;
+async function cancelarCita(codigo: string): Promise<{exito: boolean; mensaje: string}> {
+  let codigoNorm = codigo.toUpperCase();
+  if (!codigoNorm.startsWith("CITA-")) codigoNorm = "CITA-" + codigoNorm;
 
   const found = await supabase<any[]>("GET", "/rest/v1/citas", null, {
-    codigo: `eq.${codigoNormalizado}`, select: "id,estado", limit: "1",
+    codigo: `eq.${codigoNorm}`, select: "id,estado,paciente_id", limit: "1",
   });
 
   if (!found.data?.[0]) {
-    return { exito: false, mensaje: `No se encontró cita con código ${codigoNormalizado}.` };
+    return { exito: false, mensaje: `No encontré cita con código ${codigoNorm}.` };
   }
 
   if (!["pendiente","confirmada"].includes(found.data[0].estado)) {
@@ -188,8 +207,12 @@ async function cancelarCitaPorCodigo(codigo: string): Promise<{exito: boolean; m
     p_penalizar_paciente: null,
   });
 
-  return { exito: true, mensaje: `Cita ${codigoNormalizado} cancelada.` };
+  return { exito: true, mensaje: `✅ Cita ${codigoNorm} cancelada correctamente.` };
 }
+
+// ══════════════════════════════════════════════════════════
+// CLAUDE (solo para extraer datos, no para lógica principal)
+// ══════════════════════════════════════════════════════════
 
 async function extraerDatos(texto: string): Promise<any> {
   const res = await fetch("https://api.anthropic.com/v1/messages", {
@@ -201,17 +224,18 @@ async function extraerDatos(texto: string): Promise<any> {
     },
     body: JSON.stringify({
       model: "claude-haiku-4-5-20251001",
-      max_tokens: 200,
-      system: `Extrae datos del mensaje. Responde SOLO JSON sin markdown.
+      max_tokens: 150,
+      system: `Extrae datos de este mensaje de un paciente. Responde SOLO JSON:
 
-Campos:
-- nombre: nombre completo del PACIENTE (no del doctor)
-- telefono: solo dígitos, mínimo 10
-- motivo: motivo médico (dolor, síntoma, etc.)
-- es_primera: true/false
-- provincia: ciudad/sede preferida
+{
+  "nombre": "nombre del paciente si lo hay",
+  "telefono": "solo digitos",
+  "motivo": "motivo medico",
+  "es_primera": true/false,
+  "provincia": "ciudad preferida"
+}
 
-NO incluyas doctor_busqueda. Si no hay datos, devuelve {}`,
+Si no hay un dato, no lo incluyas. Si no hay nada, devuelve {}.`,
       messages: [{ role: "user", content: texto }],
     }),
   });
@@ -222,51 +246,30 @@ NO incluyas doctor_busqueda. Si no hay datos, devuelve {}`,
   } catch { return {}; }
 }
 
-async function llamarClaude(historial: {role: string; content: string}[], system: string): Promise<string> {
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": ENV.CLAUDE_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 400,
-      system,
-      messages: historial,
-    }),
-  });
-  if (!res.ok) return "Disculpe, tuve un problema técnico.";
-  const data = await res.json() as { content?: { text?: string }[] };
-  return data.content?.[0]?.text?.trim() ?? "No pude procesar su mensaje.";
-}
+// ══════════════════════════════════════════════════════════
+// FORMATOS
+// ══════════════════════════════════════════════════════════
 
 function formatDoctorEncontrado(doc: any, sedes: SedeResumen[]): string {
-  const especialidades = (doc.especialidades ?? [])
+  const esp = (doc.especialidades ?? [])
     .map((e: any) => e.especialidades?.nombre)
     .filter(Boolean)
     .join(", ");
 
   let msg = `He identificado al Dr. ${doc.nombre} ${doc.apellido}`;
-  if (especialidades) msg += ` — ${especialidades}`;
+  if (esp) msg += ` — ${esp}`;
   if (doc.extension) msg += ` (ext. ${doc.extension})`;
   msg += ".\n";
 
   if (sedes.length === 1) {
     const s = sedes[0]!;
-    msg += `\nAtiende en: ${s.clinicas?.nombre}, ${s.clinicas?.ciudad}.`;
-    if (s.clinicas?.direccion) msg += `\nDirección: ${s.clinicas.direccion}`;
-    if (s.clinicas?.telefono) msg += `\nTeléfono: ${s.clinicas.telefono}`;
-    msg += `\n\n¿Es esta su primera consulta con el doctor, o viene por seguimiento?`;
-  } else if (sedes.length > 1) {
-    msg += `\nAtiende en:\n`;
-    msg += sedes.map((s, i) => {
-      let linea = `${i + 1}. ${s.clinicas?.nombre} — ${s.clinicas?.ciudad}`;
-      if (s.clinicas?.telefono) linea += ` — Tel: ${s.clinicas.telefono}`;
-      return linea;
-    }).join("\n");
-    msg += `\n\n¿En cuál sede desea ser atendido?`;
+    msg += `\n📍 ${s.clinicas?.nombre}, ${s.clinicas?.ciudad}`;
+    if (s.clinicas?.telefono) msg += `\n📞 ${s.clinicas.telefono}`;
+    msg += `\n\n¿Primera consulta o seguimiento?`;
+  } else {
+    msg += `\n📍 Sedes disponibles:\n`;
+    msg += sedes.map((s, i) => `${i + 1}. ${s.clinicas?.nombre} — ${s.clinicas?.ciudad}`).join("\n");
+    msg += `\n\n¿En cuál sede? (número o nombre)`;
   }
   return msg;
 }
@@ -277,76 +280,122 @@ function formatDoctorEncontrado(doc: any, sedes: SedeResumen[]): string {
 
 export async function procesarMensaje(chatId: string, texto: string): Promise<void> {
   let sesion = await getSesion(chatId);
-  const historial: {role: string; content: string}[] = sesion.historial ?? [];
   const tl = texto.toLowerCase().trim();
 
-  // ── SALUDO / RESET ──
-  const esSaludo = texto === "/start" || ["hola","buenas","buenos dias","buenas tardes","buenas noches","inicio"].includes(tl);
-  if (esSaludo) {
-    await deleteSesion(chatId);
-    sesion = { paso: "inicio" };
-    historial.length = 0;
-    await enviar(chatId, BOT_BIENVENIDA);
-    return;
-  }
+  console.log(`[MENSAJE] "${texto}" | paso: ${sesion.paso} | codigo_guardado: ${sesion.ultima_cita_codigo}`);
 
-  // ── CANCELAR ──
-  const esCancelacion = await detectarIntencionCancelar(texto);
-  const pareceCodigo = /^CITA-[A-Z0-9]+$/i.test(texto) || /^[A-Z0-9]{4,}$/i.test(texto);
-  const mencionaCancelar = tl.includes("cancelar") || tl.includes("anular");
+  // ═══════════════════════════════════════════════════════
+  // 1. DETECTAR CANCELACIÓN (alto prioridad)
+  // ═══════════════════════════════════════════════════════
+  
+  const quiereCancelar = esIntencionCancelar(texto);
+  const codigoEnTexto = extraerCodigoCita(texto);
 
-  if (esCancelacion || mencionaCancelar || sesion.paso === "esperando_codigo_cancelar") {
-    if (sesion.ultima_cita_codigo && !pareceCodigo) {
-      const r = await cancelarCitaPorCodigo(sesion.ultima_cita_codigo);
-      await enviar(chatId, r.mensaje);
-      if (r.exito) sesion.ultima_cita_codigo = undefined;
-      await setSesion(chatId, sesion);
-      return;
-    }
-    if (pareceCodigo) {
-      const codigo = texto.trim();
-      const r = await cancelarCitaPorCodigo(codigo);
+  if (quiereCancelar || codigoEnTexto || sesion.paso === "cancelar") {
+    
+    // Si escribió un código directamente
+    if (codigoEnTexto && !quiereCancelar) {
+      const r = await cancelarCita(codigoEnTexto);
       await enviar(chatId, r.mensaje);
       sesion.paso = "inicio";
       await setSesion(chatId, sesion);
       return;
     }
-    await enviar(chatId, "Indique el código de la cita a cancelar (ej: CITA-8855FC):");
-    sesion.paso = "esperando_codigo_cancelar";
+
+    // Si quiere cancelar y tenemos código guardado
+    if (quiereCancelar && sesion.ultima_cita_codigo && !codigoEnTexto) {
+      await enviar(chatId, `¿Desea cancelar su cita ${sesion.ultima_cita_codigo}? Responda: SI o indique otro código.`);
+      sesion.paso = "confirmar_cancelar";
+      await setSesion(chatId, sesion);
+      return;
+    }
+
+    // Si está confirmando cancelación
+    if (sesion.paso === "confirmar_cancelar") {
+      if (["si","sí","yes","ok"].includes(tl)) {
+        const r = await cancelarCita(sesion.ultima_cita_codigo!);
+        await enviar(chatId, r.mensaje);
+        sesion.ultima_cita_codigo = undefined;
+      } else {
+        // Asumir que escribió otro código
+        const codigo = extraerCodigoCita(texto) || texto;
+        const r = await cancelarCita(codigo);
+        await enviar(chatId, r.mensaje);
+      }
+      sesion.paso = "inicio";
+      await setSesion(chatId, sesion);
+      return;
+    }
+
+    // Si quiere cancelar pero no tenemos código
+    if (quiereCancelar && !sesion.ultima_cita_codigo) {
+      await enviar(chatId, "Indique el código de la cita a cancelar (ej: CITA-A54CD8 o solo A54CD8):");
+      sesion.paso = "cancelar";
+      await setSesion(chatId, sesion);
+      return;
+    }
+
+    // Si está en paso cancelar y escribe código
+    if (sesion.paso === "cancelar") {
+      const codigo = extraerCodigoCita(texto) || texto;
+      const r = await cancelarCita(codigo);
+      await enviar(chatId, r.mensaje);
+      sesion.paso = "inicio";
+      await setSesion(chatId, sesion);
+      return;
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════
+  // 2. SALUDO / RESET
+  // ═══════════════════════════════════════════════════════
+  
+  if (texto === "/start" || ["hola","buenas","buenos dias","buenas tardes"].includes(tl)) {
+    // NO borrar ultima_cita_codigo para permitir cancelar después de saludar
+    const codigoGuardado = sesion.ultima_cita_codigo;
+    sesion = { paso: "inicio", ultima_cita_codigo: codigoGuardado };
     await setSesion(chatId, sesion);
+    await enviar(chatId, BOT_BIENVENIDA);
     return;
   }
 
-  // ── EXTRAER DATOS CON CLAUDE ──
+  // ═══════════════════════════════════════════════════════
+  // 3. EXTRAER DATOS CON CLAUDE
+  // ═══════════════════════════════════════════════════════
+  
   const datos = await extraerDatos(texto);
-  console.log("[Datos extraídos]", JSON.stringify(datos));
+  console.log("[EXTRAIDO]", datos);
 
-  // Guardar datos extraídos
   if (datos.nombre && !sesion.nombre) sesion.nombre = datos.nombre;
   if (datos.motivo && !sesion.motivo) sesion.motivo = datos.motivo;
-  if (datos.es_primera !== undefined && sesion.es_primera === undefined) sesion.es_primera = datos.es_primera;
   if (datos.telefono && !sesion.telefono) {
     const t = validarTelefonoRD(datos.telefono);
     if (t) sesion.telefono = t;
   }
+  if (datos.es_primera !== undefined && sesion.es_primera === undefined) {
+    sesion.es_primera = datos.es_primera;
+  }
 
   // Detección directa de tipo consulta
   if (sesion.es_primera === undefined) {
-    if (["primera","primera vez","nuevo","nueva"].some(p => tl.includes(p))) sesion.es_primera = true;
-    else if (["seguimiento","control","revision","chequeo"].some(p => tl.includes(p))) sesion.es_primera = false;
+    if (["primera","nueva","nuevo"].some(p => tl.includes(p))) sesion.es_primera = true;
+    else if (["seguimiento","control","revision"].some(p => tl.includes(p))) sesion.es_primera = false;
   }
 
-  // ── BÚSQUEDA DE DOCTOR ──
+  // ═══════════════════════════════════════════════════════
+  // 4. BÚSQUEDA DE DOCTOR
+  // ═══════════════════════════════════════════════════════
+  
   if (!sesion.doctor_id && !sesion.doctores_multiples) {
     const resultado = await buscarDoctorAgresivo(texto);
 
     if (resultado?.multiples) {
-      const lista = resultado.multiples.map((d: any, i: number) =>
-        `${i + 1}. Dr. ${d.nombre} ${d.apellido}${d.extension ? ` (ext. ${d.extension})` : ""}`
-      ).join("\n");
       sesion.doctores_multiples = resultado.multiples;
       await setSesion(chatId, sesion);
-      await enviar(chatId, `Encontré varios doctores:\n\n${lista}\n\nIndique el número o extensión:`);
+      const lista = resultado.multiples.map((d: any, i: number) => 
+        `${i + 1}. Dr. ${d.nombre} ${d.apellido}${d.extension ? ` (ext. ${d.extension})` : ""}`
+      ).join("\n");
+      await enviar(chatId, `Encontré varios doctores:\n\n${lista}\n\nIndique el número:`);
       return;
     }
 
@@ -355,8 +404,8 @@ export async function procesarMensaje(chatId: string, texto: string): Promise<vo
       sesion.doctor_nombre = `Dr. ${resultado.nombre} ${resultado.apellido}`;
       if (resultado.extension) sesion.doctor_extension = resultado.extension;
 
-      // Limpiar nombre si coincide con doctor
-      if (sesion.nombre?.toLowerCase() === `${resultado.nombre} ${resultado.apellido}`.toLowerCase()) {
+      // Limpiar nombre si es el doctor
+      if (sesion.nombre?.toLowerCase().includes(resultado.nombre.toLowerCase())) {
         delete sesion.nombre;
       }
 
@@ -375,22 +424,21 @@ export async function procesarMensaje(chatId: string, texto: string): Promise<vo
       return;
     }
 
-    await enviar(chatId, "No encontré doctor con ese nombre/extensión. Verifique e intente de nuevo.");
+    await enviar(chatId, "No encontré doctor con ese nombre. Intente de nuevo:");
     return;
   }
 
-  // ── SELECCIÓN DOCTOR MÚLTIPLE ──
+  // Selección doctor múltiple
   if (!sesion.doctor_id && sesion.doctores_multiples) {
     const num = parseInt(texto) - 1;
     if (!isNaN(num) && num >= 0 && num < sesion.doctores_multiples.length) {
       const doc = sesion.doctores_multiples[num]!;
       sesion.doctor_id = doc.id;
       sesion.doctor_nombre = `Dr. ${doc.nombre} ${doc.apellido}`;
-      if (doc.extension) sesion.doctor_extension = doc.extension;
       const sedes = await buscarSedes(doc.id);
       sesion.sedes_disponibles = sedes;
       delete sesion.doctores_multiples;
-
+      
       if (sedes.length === 1) {
         const u = sedes[0]!;
         sesion.sede_id = u.id;
@@ -401,11 +449,14 @@ export async function procesarMensaje(chatId: string, texto: string): Promise<vo
       await enviar(chatId, formatDoctorEncontrado(doc, sedes));
       return;
     }
-    await enviar(chatId, "Número inválido. Intente de nuevo.");
+    await enviar(chatId, "Número inválido. Intente de nuevo:");
     return;
   }
 
-  // ── SELECCIÓN DE SEDE ──
+  // ═══════════════════════════════════════════════════════
+  // 5. SELECCIÓN DE SEDE
+  // ═══════════════════════════════════════════════════════
+  
   if (sesion.doctor_id && !sesion.sede_id && sesion.sedes_disponibles) {
     const sedes = sesion.sedes_disponibles;
     const num = parseInt(texto) - 1;
@@ -414,11 +465,10 @@ export async function procesarMensaje(chatId: string, texto: string): Promise<vo
     if (!isNaN(num) && num >= 0 && num < sedes.length) {
       elegida = sedes[num];
     } else {
-      const txt = tl;
       elegida = sedes.find(s => {
         const nom = s.clinicas?.nombre?.toLowerCase() ?? "";
         const ciu = s.clinicas?.ciudad?.toLowerCase() ?? "";
-        return nom.includes(txt) || txt.includes(nom) || ciu.includes(txt) || txt.includes(ciu);
+        return nom.includes(tl) || tl.includes(nom) || ciu.includes(tl);
       });
     }
 
@@ -427,24 +477,26 @@ export async function procesarMensaje(chatId: string, texto: string): Promise<vo
       sesion.sede_nombre = `${elegida.clinicas?.nombre} (${elegida.clinicas?.ciudad})`;
       sesion.servicios_disponibles = await buscarServicios(elegida.id);
       
-      let resp = `Perfecto. ${sesion.sede_nombre}.`;
-      if (elegida.clinicas?.direccion) resp += `\nDirección: ${elegida.clinicas.direccion}`;
-      if (elegida.clinicas?.telefono) resp += `\nTeléfono: ${elegida.clinicas.telefono}`;
-      resp += `\n\n¿Es primera consulta o seguimiento?`;
+      let resp = `✅ ${sesion.sede_nombre}`;
+      if (elegida.clinicas?.telefono) resp += `\n📞 ${elegida.clinicas.telefono}`;
+      resp += `\n\n¿Primera consulta o seguimiento?`;
       
       await setSesion(chatId, sesion);
       await enviar(chatId, resp);
       return;
     }
-    await enviar(chatId, "No entendí la sede. Indique el número o nombre:");
+    await enviar(chatId, "No entendí. Indique número o nombre de la sede:");
     return;
   }
 
-  // ── SELECCIÓN TIPO CONSULTA ──
+  // ═══════════════════════════════════════════════════════
+  // 6. TIPO CONSULTA → SERVICIO
+  // ═══════════════════════════════════════════════════════
+  
   if (sesion.sede_id && sesion.es_primera === undefined) {
-    if (["primera","nueva","nuevo"].some(p => tl.includes(p))) {
+    if (["primera","nueva"].some(p => tl.includes(p))) {
       sesion.es_primera = true;
-    } else if (["seguimiento","control","revision"].some(p => tl.includes(p))) {
+    } else if (["seguimiento","control"].some(p => tl.includes(p))) {
       sesion.es_primera = false;
     } else {
       await enviar(chatId, "¿Es primera consulta o seguimiento?");
@@ -452,7 +504,6 @@ export async function procesarMensaje(chatId: string, texto: string): Promise<vo
     }
   }
 
-  // ── ASIGNAR SERVICIO ──
   if (sesion.sede_id && sesion.es_primera !== undefined && !sesion.servicio_id) {
     const servicios = sesion.servicios_disponibles ?? [];
     const srv = sesion.es_primera
@@ -461,38 +512,39 @@ export async function procesarMensaje(chatId: string, texto: string): Promise<vo
     if (srv) sesion.servicio_id = srv.id;
   }
 
-  // ── PEDIR NOMBRE ──
+  // ═══════════════════════════════════════════════════════
+  // 7. DATOS DEL PACIENTE (nombre → teléfono → motivo)
+  // ═══════════════════════════════════════════════════════
+  
   if (sesion.servicio_id && !sesion.nombre) {
     await enviar(chatId, "Me permite su nombre completo:");
     return;
   }
 
-  // ── PEDIR TELÉFONO ──
   if (sesion.nombre && !sesion.telefono) {
-    // Validar si el texto actual es teléfono
     const t = validarTelefonoRD(texto);
     if (t) {
       sesion.telefono = t;
     } else {
-      await enviar(chatId, "Me permite su número de teléfono (10 dígitos, 809/829/849):");
+      await enviar(chatId, "Número de teléfono (10 dígitos, 809/829/849):");
       return;
     }
   }
 
-  // ── PEDIR MOTIVO ──
   if (sesion.telefono && !sesion.motivo) {
     if (datos.motivo) {
       sesion.motivo = datos.motivo;
     } else {
-      await enviar(chatId, "¿Cuál es el motivo de su consulta?");
+      await enviar(chatId, "¿Motivo de la consulta?");
       return;
     }
   }
 
-  // ── MOSTRAR DÍAS DISPONIBLES ──
+  // ═══════════════════════════════════════════════════════
+  // 8. MOSTRAR DÍAS DISPONIBLES
+  // ═══════════════════════════════════════════════════════
+  
   if (sesion.motivo && sesion.paso !== "elegir_dia" && sesion.paso !== "elegir_hora") {
-    console.log("[BUSCANDO DÍAS] sede=", sesion.sede_id, "servicio=", sesion.servicio_id);
-    
     const result = await rpc<any>("fn_dias_disponibles", {
       p_doctor_clinica_id: sesion.sede_id,
       p_servicio_id: sesion.servicio_id,
@@ -500,10 +552,10 @@ export async function procesarMensaje(chatId: string, texto: string): Promise<vo
       p_max_resultados: 5,
     });
 
-    let dias = (result.data ?? []).filter((d: any) => d.fecha >= fechaHoyRD());
+    const dias = (result.data ?? []).filter((d: any) => d.fecha >= fechaHoyRD());
 
     if (dias.length === 0) {
-      await enviar(chatId, "No hay citas disponibles en los próximos 14 días. Intente otra sede.");
+      await enviar(chatId, "No hay citas disponibles. Intente otra sede.");
       return;
     }
 
@@ -512,18 +564,21 @@ export async function procesarMensaje(chatId: string, texto: string): Promise<vo
     await setSesion(chatId, sesion);
 
     const lista = dias.map((d: any, i: number) => 
-      `${i + 1}. ${formatFecha(d.fecha)} — ${d.total_slots} horarios`
+      `${i + 1}. ${formatFecha(d.fecha)} (${d.total_slots} horarios)`
     ).join("\n");
     
-    await enviar(chatId, `Días disponibles:\n\n${lista}\n\n¿Para qué día? (1-${dias.length})`);
+    await enviar(chatId, `📅 Días disponibles:\n\n${lista}\n\n¿Qué día? (1-${dias.length})`);
     return;
   }
 
-  // ── SELECCIÓN DE DÍA ──
+  // ═══════════════════════════════════════════════════════
+  // 9. SELECCIÓN DE DÍA
+  // ═══════════════════════════════════════════════════════
+  
   if (sesion.paso === "elegir_dia" && sesion.dias_disponibles) {
     const num = parseInt(texto) - 1;
     if (isNaN(num) || num < 0 || num >= sesion.dias_disponibles.length) {
-      await enviar(chatId, `Seleccione un número del 1 al ${sesion.dias_disponibles.length}:`);
+      await enviar(chatId, `Elija 1-${sesion.dias_disponibles.length}:`);
       return;
     }
 
@@ -531,27 +586,29 @@ export async function procesarMensaje(chatId: string, texto: string): Promise<vo
     const { texto: slotsTexto, slots } = await buscarSlots(sesion.sede_id!, sesion.servicio_id!, fechaSel);
 
     if (slots.length === 0) {
-      await enviar(chatId, "Ya no hay horarios para ese día. Elija otro:");
+      await enviar(chatId, "No hay horarios. Elija otro día:");
       return;
     }
 
     sesion.fecha_sel = fechaSel;
     sesion.slots = slots;
-    sesion.slots_disponibles = slotsTexto;
     sesion.paso = "elegir_hora";
     await setSesion(chatId, sesion);
 
-    await enviar(chatId, `Horarios para ${formatFecha(fechaSel)}:\n\n${slotsTexto}\n\n¿Cuál prefiere?`);
+    await enviar(chatId, `⏰ Horarios ${formatFecha(fechaSel)}:\n\n${slotsTexto}\n\n¿Cuál hora?`);
     return;
   }
 
-  // ── SELECCIÓN DE HORA ──
+  // ═══════════════════════════════════════════════════════
+  // 10. SELECCIÓN DE HORA Y AGENDAR
+  // ═══════════════════════════════════════════════════════
+  
   if (sesion.paso === "elegir_hora" && sesion.slots) {
     const num = parseInt(texto) - 1;
     let slot = sesion.slots[num];
 
-    // Si no es número, buscar por texto de hora
     if (!slot) {
+      // Buscar por texto de hora
       const txt = texto.toLowerCase().replace(/\s/g, "").replace(".", ":");
       slot = sesion.slots.find(s => s.hora.toLowerCase().replace(/\s/g, "").includes(txt));
     }
@@ -572,30 +629,34 @@ export async function procesarMensaje(chatId: string, texto: string): Promise<vo
 
     const codigo = await agendarCita(sesion, slot);
     if (!codigo) {
-      await enviar(chatId, "Ese horario ya no está disponible. Intente con otro:");
+      await enviar(chatId, "Horario ya no disponible. Elija otro:");
       return;
     }
 
-    // Guardar sesión con código, NO borrar
-    sesion.paso = "inicio";
-    sesion.ultima_cita_codigo = codigo;
-    sesion.dias_disponibles = undefined;
-    sesion.slots = undefined;
+    // Guardar código y resetear flujo pero MANTENER código para cancelación
+    sesion = {
+      paso: "inicio",
+      ultima_cita_codigo: codigo,
+      doctor_id: sesion.doctor_id,
+      doctor_nombre: sesion.doctor_nombre,
+    };
     await setSesion(chatId, sesion);
 
     await enviar(chatId,
-      `✅ Cita reservada\n\n` +
-      `Doctor: ${sesion.doctor_nombre}\n` +
-      `Fecha: ${formatFecha(sesion.fecha_sel!)}\n` +
-      `Hora: ${slot.hora}\n` +
-      `Paciente: ${sesion.nombre}\n` +
-      `Sede: ${sesion.sede_nombre}\n` +
-      `Código: ${codigo}\n\n` +
-      `Para cancelar escriba: cancelar`
+      `✅ *Cita reservada*\n\n` +
+      `👨‍⚕️ ${sesion.doctor_nombre}\n` +
+      `📅 ${formatFecha(sesion.fecha_sel!)} a las ${slot.hora}\n` +
+      `🏥 ${sesion.sede_nombre}\n` +
+      `👤 ${sesion.nombre}\n` +
+      `🔑 *${codigo}*\n\n` +
+      `Para cancelar escriba: cancelar o el código`
     );
     return;
   }
 
-  // ── RESPUESTA POR DEFECTO ──
-  await enviar(chatId, "No entendí. Escriba /start para comenzar de nuevo.");
+  // ═══════════════════════════════════════════════════════
+  // DEFAULT
+  // ═══════════════════════════════════════════════════════
+  
+  await enviar(chatId, "No entendí. Escriba /start para comenzar.");
 }
