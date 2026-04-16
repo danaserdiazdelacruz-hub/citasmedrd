@@ -259,8 +259,36 @@ Si no hay nada, devuelve {}`,
 
 export async function procesarMensaje(chatId: string, texto: string): Promise<void> {
   let ses = await getSesion(chatId);
+  
+  // Asegurar estructura completa de sesión
+  ses = {
+    sede_id: null,
+    servicio_id: null,
+    doctor_id: null,
+    doctor_nombre: null,
+    doctor_extension: null,
+    sede_nombre: null,
+    nombre: null,
+    telefono: null,
+    motivo: null,
+    es_primera: undefined,
+    paso: null,
+    dias_disponibles: null,
+    slots: null,
+    slot_sel: null,
+    fecha_sel: null,
+    sedes_disponibles: null,
+    servicios_disponibles: null,
+    doctores_multiples: null,
+    historial: ses.historial ?? [],
+    ...ses
+  };
+  
   const hist: {role:string;content:string}[] = ses.historial ?? [];
   const tl = texto.toLowerCase().trim();
+  
+  // Bandera para saber si necesitamos guardar sesión
+  let sesUpdated = false;
 
   // ════════════════ RESET ════════════════
   if (texto === "/start" || ["hola","buenas","buenos dias","buenas tardes","buenas noches","inicio"].includes(tl)) {
@@ -336,15 +364,15 @@ export async function procesarMensaje(chatId: string, texto: string): Promise<vo
     const phoneMatch = texto.match(/\b(809|829|849)\d{7}\b/);
     if (phoneMatch) {
       const t = telRD(phoneMatch[0]);
-      if (t) ses.telefono = t;
+      if (t) { ses.telefono = t; sesUpdated = true; }
     } else if (datos.telefono) {
       const t = telRD(datos.telefono);
-      if (t) ses.telefono = t;
+      if (t) { ses.telefono = t; sesUpdated = true; }
     }
   }
 
   // Direct name + motivo extraction from combined messages like "daniela 8098642498. bulto mamas"
-  if (!ses.nombre && ses.doctor_id) {
+  if (!ses.nombre) {
     const phonePat = /\b(809|829|849)\d{7}\b/;
     const medWords = new Set(["bulto","dolor","sangrado","flujo","ardor","chequeo","quiste","masa",
       "nodulo","nódulo","biopsia","mama","mamas","seno","senos","papanicolaou","mamografia","screening",
@@ -362,30 +390,39 @@ export async function procesarMensaje(chatId: string, texto: string): Promise<vo
         if (!hasMedical && words.length >= 1 && words.every(w => /^[a-záéíóúñü]+$/i.test(w))) {
           if (!ses.nombre) {
             ses.nombre = words.map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ");
+            sesUpdated = true;
           }
         } else if (hasMedical && !ses.motivo) {
           ses.motivo = part.trim();
+          sesUpdated = true;
         }
       }
     } else if (datos.nombre) {
       ses.nombre = datos.nombre;
+      sesUpdated = true;
     }
   }
 
   // Direct primera/seguimiento detection
   if (ses.es_primera === undefined) {
-    if (["primera","primera vez","primera consulta"].some(p => tl.includes(p))) ses.es_primera = true;
-    else if (["seguimiento","control","revision","revisión","chequeo"].some(p => tl.includes(p))) ses.es_primera = false;
-    else if (datos.es_primera !== undefined) ses.es_primera = datos.es_primera;
+    if (["primera","primera vez","primera consulta"].some(p => tl.includes(p))) { ses.es_primera = true; sesUpdated = true; }
+    else if (["seguimiento","control","revision","revisión","chequeo"].some(p => tl.includes(p))) { ses.es_primera = false; sesUpdated = true; }
+    else if (datos.es_primera !== undefined) { ses.es_primera = datos.es_primera; sesUpdated = true; }
   }
 
   // Direct motivo detection for common medical terms
-  if (!ses.motivo && ses.sede_id) {
+  if (!ses.motivo) {
     const medTerms = ["bulto","dolor","sangrado","flujo","ardor","picazón","irregularidad",
       "quiste","masa","nódulo","biopsia","papanicolaou","mamografía","screening","revisión anual"];
     if (medTerms.some(t => tl.includes(t)) || datos.motivo) {
       ses.motivo = datos.motivo || texto.trim();
+      sesUpdated = true;
     }
+  }
+
+  // Guardar sesión si se actualizaron datos
+  if (sesUpdated) {
+    await setSesion(chatId, ses);
   }
 
   // ════════════════ FIND DOCTOR ════════════════
