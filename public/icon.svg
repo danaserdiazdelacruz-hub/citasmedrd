@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#14B8A6"/>
+      <stop offset="100%" stop-color="#0D9488"/>
+    </linearGradient>
+  </defs>
+  <!-- Fondo redondeado -->
+  <rect width="512" height="512" rx="96" fill="url(#g)"/>
+  <!-- Símbolo: calendario con cruz médica -->
+  <g transform="translate(106,128)">
+    <!-- Calendario base -->
+    <rect x="0" y="24" width="300" height="260" rx="24" fill="white"/>
+    <rect x="0" y="24" width="300" height="56" rx="24" fill="#0F766E"/>
+    <!-- Anillas arriba -->
+    <rect x="48" y="0" width="16" height="48" rx="8" fill="#0F766E"/>
+    <rect x="236" y="0" width="16" height="48" rx="8" fill="#0F766E"/>
+    <!-- Cruz médica -->
+    <rect x="120" y="130" width="60" height="130" rx="14" fill="#14B8A6"/>
+    <rect x="85" y="165" width="130" height="60" rx="14" fill="#14B8A6"/>
+  </g>
+</svg>
