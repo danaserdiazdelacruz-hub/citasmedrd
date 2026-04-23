@@ -168,15 +168,47 @@ async function slotsParaFecha(dcId: string, srvId: string, fecha: string) {
   });
   const hoy = hoyRD();
   const ahora = ahoraRD();
-  return (result.data ?? [])
+  const slotsBase = (result.data ?? [])
     .filter((s: any) => {
       if (fecha === hoy) {
         const t = new Date(new Date(s.inicia_en).toLocaleString("en-US", { timeZone: TZ }));
         if (t <= ahora) return false;
       }
       return true;
+    });
+
+  // Con max_pacientes_hora=3, filtrar horas ya llenas (para no ofrecer
+  // slots que fn_agendar_cita luego va a rechazar por cupo de hora).
+  // Contamos citas activas por hora en ese día.
+  const desdeISO = `${fecha}T00:00:00-04:00`;
+  const hastaISO = `${fecha}T23:59:59-04:00`;
+  const citas = await supabase<any[]>("GET", "/rest/v1/citas", null, {
+    doctor_clinica_id: `eq.${dcId}`,
+    estado: "in.(pendiente,confirmada)",
+    inicia_en: `gte.${desdeISO}`,
+    select: "inicia_en",
+    limit: "200",
+  });
+  const citasEnDia = (citas.data || []).filter((c: any) => c.inicia_en <= hastaISO);
+  const porHora = new Map<number, number>();
+  for (const c of citasEnDia) {
+    const h = new Date(new Date(c.inicia_en).toLocaleString("en-US", { timeZone: TZ })).getHours();
+    porHora.set(h, (porHora.get(h) ?? 0) + 1);
+  }
+
+  // Consultar el cupo máximo por hora de este doctor_clinica (default 3)
+  const dc = await supabase<any[]>("GET", "/rest/v1/doctor_clinica", null, {
+    id: `eq.${dcId}`, select: "max_pacientes_hora", limit: "1",
+  });
+  const maxHora = dc.data?.[0]?.max_pacientes_hora ?? 3;
+
+  return slotsBase
+    .filter((s: any) => {
+      const h = new Date(new Date(s.inicia_en).toLocaleString("en-US", { timeZone: TZ })).getHours();
+      return (porHora.get(h) ?? 0) < maxHora;
     })
-    .slice(0, 10)
+    // Mostrar hasta 20 slots (suficiente para un día completo de 18 slots)
+    .slice(0, 20)
     .map((s: any) => ({ inicia_en: s.inicia_en, hora: fmtHora(s.inicia_en) }));
 }
 
