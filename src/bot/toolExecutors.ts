@@ -422,9 +422,28 @@ export async function exec_agendar_cita(args: {
   if (!cita.data?.[0]?.exito) {
     const errorMsg = cita.data?.[0]?.mensaje ?? "Ese horario no está disponible.";
     console.log(`[AGENDAR] FALLÓ inicia="${iniciaNormalizado}" → ${errorMsg}`);
+
+    // Al fallar, cargar alternativas cercanas del MISMO día para que el LLM
+    // las ofrezca al paciente. Esto evita que el bot diga "no disponible"
+    // y ahí termine, sin decirle al usuario qué otras horas sí hay.
+    let alternativas: Array<{ hora: string; inicia_en: string }> = [];
+    try {
+      const fecha = iniciaNormalizado.split("T")[0];
+      const otros = await slotsParaFecha(args.doctor_clinica_id, srvId, fecha);
+      alternativas = otros
+        .filter(s => s.inicia_en !== iniciaNormalizado)
+        .slice(0, 6);
+    } catch (e: any) {
+      console.warn(`[AGENDAR] no pude cargar alternativas: ${e.message}`);
+    }
+
     return JSON.stringify({
-      exito: false, error: errorMsg,
-      instruccion_bot: "Dile la verdad al paciente. NO digas 'acaba de ser ocupado'. Ofrece otros horarios con buscar_horarios.",
+      exito: false,
+      error: errorMsg,
+      alternativas,
+      instruccion_bot: alternativas.length
+        ? `El horario solicitado no está disponible. Ofrece al paciente estas alternativas del mismo día: ${alternativas.map(a => a.hora).join(", ")}. Cuando elija una, usa su inicia_en exacto para llamar agendar_cita de nuevo. NO inventes que 'se acaba de tomar'.`
+        : "Dile la verdad al paciente: ese horario no está disponible y no hay más horarios libres ese día. Ofrécele buscar en otro día con buscar_disponibilidad.",
     });
   }
   console.log(`[AGENDAR] OK código=${cita.data[0].codigo} paciente=${pacienteId}`);
