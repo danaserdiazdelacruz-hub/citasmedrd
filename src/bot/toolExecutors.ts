@@ -26,6 +26,22 @@ function fmtFecha(fecha: string): string {
 }
 
 /**
+ * Normaliza un timestamp que manda el LLM para fn_agendar_cita.
+ * Si el LLM olvidó la zona horaria (ej: "2026-04-28T08:00:00"), Postgres
+ * lo leería como UTC y no encontraría ningún slot. Asumimos hora RD (-04:00)
+ * cuando no viene explícita. Si viene con Z o ±HH:MM, se respeta.
+ */
+function normalizarIniciaEn(raw: string): string | null {
+  if (!raw) return null;
+  const m = raw.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}(?::\d{2})?)/);
+  if (!m) return null;
+  const tieneOffset = /([+-]\d{2}:?\d{2}|Z)$/.test(raw);
+  const fecha = m[1];
+  const hora = m[2].length === 5 ? `${m[2]}:00` : m[2];
+  return tieneOffset ? raw : `${fecha}T${hora}-04:00`;
+}
+
+/**
  * Valida una cédula dominicana.
  * Formato esperado: 000-0000000-0 o 00000000000 (11 dígitos).
  * Aplica el algoritmo de Luhn mod-10 con multiplicadores [1,2,1,2,...].
@@ -117,7 +133,11 @@ async function resolverServicio(dcId: string, servicioId?: string): Promise<stri
   return null;
 }
 
-/** Busca slots filtrados para una fecha */
+/** Busca slots filtrados para una fecha.
+ *  NO filtramos por módulo de minutos: la cadencia la manda duracion_base_min
+ *  del doctor_clinica. Solo descartamos horas ya pasadas si la fecha es hoy.
+ *  Limitamos a 10 opciones para no abrumar al paciente.
+ */
 async function slotsParaFecha(dcId: string, srvId: string, fecha: string) {
   const result = await rpc<any>("fn_slots_con_espacio", {
     p_doctor_clinica_id: dcId, p_fecha: fecha, p_servicio_id: srvId,
@@ -130,8 +150,7 @@ async function slotsParaFecha(dcId: string, srvId: string, fecha: string) {
         const t = new Date(new Date(s.inicia_en).toLocaleString("en-US", { timeZone: TZ }));
         if (t <= ahora) return false;
       }
-      const dt = new Date(new Date(s.inicia_en).toLocaleString("en-US", { timeZone: TZ }));
-      return dt.getMinutes() % 20 === 0;
+      return true;
     })
     .slice(0, 10)
     .map((s: any) => ({ inicia_en: s.inicia_en, hora: fmtHora(s.inicia_en) }));
@@ -370,6 +389,14 @@ export async function exec_agendar_cita(args: {
     return JSON.stringify({ exito: false, error: "Nombre del paciente requerido." });
   }
 
+  // FIX: normalizar inicia_en. Si el LLM olvidó la zona horaria,
+  // Postgres lo trataría como UTC y no encontraría ningún slot.
+  const iniciaNormalizado = normalizarIniciaEn(args.inicia_en);
+  if (!iniciaNormalizado) {
+    return JSON.stringify({ exito: false, error: "Horario inválido" });
+  }
+  console.log(`[AGENDAR] inicia_en recibido="${args.inicia_en}" → normalizado="${iniciaNormalizado}"`);
+
   const srvId = await resolverServicio(args.doctor_clinica_id, args.servicio_id);
   if (!srvId) return JSON.stringify({ exito: false, error: "No hay servicios configurados" });
 
@@ -396,7 +423,7 @@ export async function exec_agendar_cita(args: {
 
   // Detectar duplicados: mismo paciente + misma sede + mismo día
   const pacienteId = pac.data[0].paciente_id;
-  const dup = await detectarCitaDuplicada(pacienteId, args.doctor_clinica_id, args.inicia_en);
+  const dup = await detectarCitaDuplicada(pacienteId, args.doctor_clinica_id, iniciaNormalizado);
   if (dup.duplicada) {
     return JSON.stringify({
       exito: false,
@@ -408,9 +435,9 @@ export async function exec_agendar_cita(args: {
 
   const cita = await rpc<any>("fn_agendar_cita", {
     p_doctor_clinica_id: args.doctor_clinica_id,
-    p_paciente_id: pac.data[0].paciente_id,
+    p_paciente_id: pacienteId,
     p_servicio_id: srvId,
-    p_inicia_en: args.inicia_en,
+    p_inicia_en: iniciaNormalizado,
     p_motivo: motivo,
     p_canal: "telegram",
     p_creado_por: null,
@@ -420,7 +447,7 @@ export async function exec_agendar_cita(args: {
 
   if (!cita.data?.[0]?.exito) {
     const errorMsg = cita.data?.[0]?.mensaje ?? "Ese horario no está disponible.";
-    console.log(`[AGENDAR] FALLÓ: ${errorMsg}`);
+    console.log(`[AGENDAR] FALLÓ con inicia_en="${iniciaNormalizado}" → ${errorMsg}`);
     // Incluir instrucción para el LLM: decir la verdad, no inventar "acaba de ser ocupado"
     return JSON.stringify({
       exito: false,
@@ -491,6 +518,13 @@ export async function exec_reagendar_cita(args: {
   if (code.length < 4) return JSON.stringify({ exito: false, error: "Código inválido" });
   code = "CITA-" + code;
 
+  // FIX: normalizar también nuevo_inicia_en
+  const nuevoNormalizado = normalizarIniciaEn(args.nuevo_inicia_en);
+  if (!nuevoNormalizado) {
+    return JSON.stringify({ exito: false, error: "Nueva fecha/hora inválida" });
+  }
+  console.log(`[REAGENDAR] nuevo_inicia_en recibido="${args.nuevo_inicia_en}" → normalizado="${nuevoNormalizado}"`);
+
   // 1) Buscar la cita original
   const found = await supabase<any[]>("GET", "/rest/v1/citas", null, {
     codigo: `eq.${code}`,
@@ -510,7 +544,7 @@ export async function exec_reagendar_cita(args: {
   }
 
   // 2) Validar nueva fecha: debe ser futura
-  const nuevaDate = new Date(args.nuevo_inicia_en);
+  const nuevaDate = new Date(nuevoNormalizado);
   if (isNaN(nuevaDate.getTime())) {
     return JSON.stringify({ exito: false, error: "Fecha/hora nueva inválida" });
   }
@@ -519,7 +553,7 @@ export async function exec_reagendar_cita(args: {
   }
 
   // 3) Misma hora que la original? No tiene sentido
-  if (citaOriginal.inicia_en === args.nuevo_inicia_en) {
+  if (citaOriginal.inicia_en === nuevoNormalizado) {
     return JSON.stringify({
       exito: false,
       error: "La nueva hora es la misma que la actual",
@@ -527,7 +561,7 @@ export async function exec_reagendar_cita(args: {
   }
 
   // 4) Verificar que el slot esté disponible (usando fn_slots_con_espacio)
-  const fechaStr = args.nuevo_inicia_en.split("T")[0];
+  const fechaStr = nuevoNormalizado.split("T")[0];
   const slots = await rpc<any>("fn_slots_con_espacio", {
     p_doctor_clinica_id: citaOriginal.doctor_clinica_id,
     p_servicio_id: citaOriginal.servicio_id,
@@ -536,7 +570,7 @@ export async function exec_reagendar_cita(args: {
 
   const disponible = (slots.data || []).find((s: any) => {
     const slotIso = s.inicia_en || s.inicia;
-    return slotIso && slotIso.startsWith(args.nuevo_inicia_en.substring(0, 16));
+    return slotIso && slotIso.startsWith(nuevoNormalizado.substring(0, 16));
   });
 
   if (!disponible) {
@@ -566,7 +600,7 @@ export async function exec_reagendar_cita(args: {
     p_doctor_clinica_id: citaOriginal.doctor_clinica_id,
     p_paciente_id: citaOriginal.paciente_id,
     p_servicio_id: citaOriginal.servicio_id,
-    p_inicia_en: args.nuevo_inicia_en,
+    p_inicia_en: nuevoNormalizado,
     p_motivo: citaOriginal.motivo,
     p_canal: "telegram",
     p_creado_por: null,
@@ -590,7 +624,7 @@ export async function exec_reagendar_cita(args: {
     codigo_anterior: code,
     codigo_nuevo: nueva.data[0].codigo,
     nueva_fecha: fmtFecha(fechaStr),
-    nueva_hora: fmtHora(args.nuevo_inicia_en),
+    nueva_hora: fmtHora(nuevoNormalizado),
   });
 }
 
