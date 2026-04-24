@@ -51,11 +51,6 @@ function normalizarIniciaEn(raw: string): string | null {
 
 // ──────────────────── validaciones ────────────────────
 
-/**
- * Valida y normaliza un teléfono dominicano.
- * Acepta: "8094563214", "+18094563214", "809-456-3214", "(809) 456 3214".
- * Rechaza: 11 dígitos sin ser +1, prefijos no-DO, < 10 dígitos, strings vacíos.
- */
 export function validarTelefonoDO(raw: string): {
   valido: boolean; normalizado: string | null; motivo?: string;
 } {
@@ -419,13 +414,22 @@ export async function exec_agendar_cita(args: {
     p_canal: "telegram", p_creado_por: null,
   });
 
-  if (!cita.data?.[0]?.exito) {
-    const errorMsg = cita.data?.[0]?.mensaje ?? "Ese horario no está disponible.";
-    console.log(`[AGENDAR] FALLÓ inicia="${iniciaNormalizado}" → ${errorMsg}`);
+  // Detectar exclusion_violation (23P01) que burbujea como HTTP 400 sin data
+  const hubo23P01 = cita.status === 400 && !cita.data;
+  const rpcFallo  = !cita.data?.[0]?.exito;
 
-    // Al fallar, cargar alternativas cercanas del MISMO día para que el LLM
-    // las ofrezca al paciente. Esto evita que el bot diga "no disponible"
-    // y ahí termine, sin decirle al usuario qué otras horas sí hay.
+  if (hubo23P01 || rpcFallo) {
+    const errorMsg = hubo23P01
+      ? "Ese horario choca con otra cita existente."
+      : (cita.data?.[0]?.mensaje ?? "Ese horario no está disponible.");
+
+    if (hubo23P01) {
+      console.error(`[AGENDAR] EXCLUDE VIOLATION (23P01) inicia="${iniciaNormalizado}". fn_slots_con_espacio ofreció un slot que colisiona con una cita viva. Revisa sincronización agenda_slots <-> citas.`);
+    } else {
+      console.log(`[AGENDAR] FALLÓ inicia="${iniciaNormalizado}" → ${errorMsg}`);
+    }
+
+    // Cargar alternativas reales del MISMO día para que el LLM las ofrezca.
     let alternativas: Array<{ hora: string; inicia_en: string }> = [];
     try {
       const fecha = iniciaNormalizado.split("T")[0];
@@ -442,10 +446,11 @@ export async function exec_agendar_cita(args: {
       error: errorMsg,
       alternativas,
       instruccion_bot: alternativas.length
-        ? `El horario solicitado no está disponible. Ofrece al paciente estas alternativas del mismo día: ${alternativas.map(a => a.hora).join(", ")}. Cuando elija una, usa su inicia_en exacto para llamar agendar_cita de nuevo. NO inventes que 'se acaba de tomar'.`
-        : "Dile la verdad al paciente: ese horario no está disponible y no hay más horarios libres ese día. Ofrécele buscar en otro día con buscar_disponibilidad.",
+        ? `El horario solicitado NO está disponible. Dile al paciente simplemente que esa hora no está disponible (sin especular por qué, sin decir "se acaba de ocupar" ni "la tomaron ahora") y ofrécele estas alternativas del mismo día: ${alternativas.map(a => a.hora).join(", ")}. Cuando elija una, usa su inicia_en exacto para llamar agendar_cita de nuevo.`
+        : "Dile al paciente que ese horario no está disponible y que no hay más horarios libres ese día. Ofrécele buscar en otro día con buscar_disponibilidad.",
     });
   }
+
   console.log(`[AGENDAR] OK código=${cita.data[0].codigo} paciente=${pacienteId}`);
   return JSON.stringify({ exito: true, codigo: cita.data[0].codigo });
 }
