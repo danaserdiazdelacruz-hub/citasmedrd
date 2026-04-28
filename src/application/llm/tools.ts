@@ -118,7 +118,7 @@ export const TOOL_SUGERIR_FECHA: Anthropic.Tool = {
 export const TOOL_SUGERIR_HORA: Anthropic.Tool = {
   name: "sugerir_hora",
   description:
-    "Sugiere una hora cuando el paciente menciona hora específica. Formato HH:MM en 24h.",
+    "Sugiere una hora cuando el paciente menciona hora específica. Formato HH:MM en 24h. Solo usar si ya hay fecha seleccionada.",
   input_schema: {
     type: "object",
     properties: {
@@ -128,6 +128,19 @@ export const TOOL_SUGERIR_HORA: Anthropic.Tool = {
       },
     },
     required: ["hora_hhmm"],
+  },
+};
+
+// ─── Tool de navegación ──────────────────────────────────────────────
+
+export const TOOL_VOLVER_ATRAS: Anthropic.Tool = {
+  name: "volver_atras",
+  description:
+    "El usuario quiere volver al paso anterior del flujo (ej: 'quiero cambiar de sede', 'no, el servicio anterior', 'volver atrás').",
+  input_schema: {
+    type: "object",
+    properties: {},
+    required: [],
   },
 };
 
@@ -157,27 +170,37 @@ export const TOOLS_IDLE: Anthropic.Tool[] = [
 
 export const TOOLS_ELIGIENDO_SEDE: Anthropic.Tool[] = [
   TOOL_SUGERIR_SEDE,
+  TOOL_VOLVER_ATRAS,
   TOOL_RESET_FLUJO,
 ];
 
 export const TOOLS_ELIGIENDO_SERVICIO: Anthropic.Tool[] = [
   TOOL_SUGERIR_SERVICIO,
+  TOOL_VOLVER_ATRAS,
   TOOL_RESET_FLUJO,
 ];
 
 export const TOOLS_ELIGIENDO_HORA: Anthropic.Tool[] = [
   TOOL_SUGERIR_FECHA,
   TOOL_SUGERIR_HORA,
+  TOOL_VOLVER_ATRAS,
   TOOL_RESET_FLUJO,
 ];
 
 export const TOOLS_PIDIENDO_NOMBRE: Anthropic.Tool[] = [
   TOOL_EXTRAER_NOMBRE,
+  TOOL_VOLVER_ATRAS,
   TOOL_RESET_FLUJO,
 ];
 
 export const TOOLS_PIDIENDO_TELEFONO: Anthropic.Tool[] = [
   TOOL_EXTRAER_TELEFONO,
+  TOOL_VOLVER_ATRAS,
+  TOOL_RESET_FLUJO,
+];
+
+export const TOOLS_ELIGIENDO_TIPO_PAGO: Anthropic.Tool[] = [
+  TOOL_VOLVER_ATRAS,
   TOOL_RESET_FLUJO,
 ];
 
@@ -194,7 +217,7 @@ export function toolsParaEstado(estado: string): Anthropic.Tool[] {
     case "ELIGIENDO_HORA":      return TOOLS_ELIGIENDO_HORA;
     case "PIDIENDO_NOMBRE":     return TOOLS_PIDIENDO_NOMBRE;
     case "PIDIENDO_TELEFONO":   return TOOLS_PIDIENDO_TELEFONO;
-    case "ELIGIENDO_TIPO_PAGO": return TOOLS_DEFAULT;
+    case "ELIGIENDO_TIPO_PAGO": return TOOLS_ELIGIENDO_TIPO_PAGO;
     case "CONFIRMANDO":         return TOOLS_DEFAULT;
     default:                    return TOOLS_DEFAULT;
   }
@@ -209,5 +232,6 @@ export const ALL_TOOLS: Anthropic.Tool[] = [
   TOOL_SUGERIR_SERVICIO,
   TOOL_SUGERIR_FECHA,
   TOOL_SUGERIR_HORA,
+  TOOL_VOLVER_ATRAS,
   TOOL_RESET_FLUJO,
 ];
