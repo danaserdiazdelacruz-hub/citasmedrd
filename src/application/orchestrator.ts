@@ -60,22 +60,22 @@ function logError(ctx: LogCtx, evt: string, err: unknown): void {
 }
 
 
-// ─── Validación de transiciones FSM ──────────────────────────────────
+// ─── Validación de transiciones FSM (RELAXED) ────────────────────────
 
 const TRANSICIONES_VALIDAS: Record<EstadoSesion, EstadoSesion[]> = {
-  IDLE: ["ELIGIENDO_SEDE", "PIDIENDO_TELEFONO"],
+  IDLE: ["ELIGIENDO_SEDE", "PIDIENDO_TELEFONO", "ELIGIENDO_INTENCION"],
   ELIGIENDO_INTENCION: ["ELIGIENDO_SEDE", "PIDIENDO_TELEFONO", "IDLE"],
   ELIGIENDO_PROFESIONAL: ["ELIGIENDO_SEDE", "IDLE"],
-  ELIGIENDO_SEDE: ["ELIGIENDO_SERVICIO", "IDLE"],
-  ELIGIENDO_SERVICIO: ["ELIGIENDO_HORA", "IDLE"],
-  ELIGIENDO_HORA: ["PIDIENDO_NOMBRE", "ELIGIENDO_HORA", "IDLE"],
-  PIDIENDO_NOMBRE: ["PIDIENDO_TELEFONO", "PIDIENDO_NOMBRE", "IDLE"],
-  PIDIENDO_TELEFONO: ["ELIGIENDO_TIPO_PAGO", "CONSULTANDO_CITA", "CANCELANDO_CITA", "PIDIENDO_TELEFONO", "IDLE"],
-  ELIGIENDO_TIPO_PAGO: ["CONFIRMANDO", "IDLE"],
+  ELIGIENDO_SEDE: ["ELIGIENDO_SERVICIO", "ELIGIENDO_HORA", "PIDIENDO_NOMBRE", "IDLE"],
+  ELIGIENDO_SERVICIO: ["ELIGIENDO_HORA", "PIDIENDO_NOMBRE", "ELIGIENDO_SEDE", "IDLE"],
+  ELIGIENDO_HORA: ["PIDIENDO_NOMBRE", "PIDIENDO_TELEFONO", "ELIGIENDO_SERVICIO", "ELIGIENDO_SEDE", "IDLE"],
+  PIDIENDO_NOMBRE: ["PIDIENDO_TELEFONO", "ELIGIENDO_HORA", "IDLE"],
+  PIDIENDO_TELEFONO: ["ELIGIENDO_TIPO_PAGO", "CONSULTANDO_CITA", "CANCELANDO_CITA", "PIDIENDO_NOMBRE", "ELIGIENDO_HORA", "IDLE"],
+  ELIGIENDO_TIPO_PAGO: ["CONFIRMANDO", "PIDIENDO_TELEFONO", "IDLE"],
   ELIGIENDO_ASEGURADORA: ["CONFIRMANDO", "IDLE"],
-  CONFIRMANDO: ["IDLE"],
-  CONSULTANDO_CITA: ["IDLE"],
-  CANCELANDO_CITA: ["IDLE"],
+  CONFIRMANDO: ["IDLE", "ELIGIENDO_TIPO_PAGO"],
+  CONSULTANDO_CITA: ["IDLE", "CANCELANDO_CITA"],
+  CANCELANDO_CITA: ["IDLE", "CONSULTANDO_CITA"],
   REAGENDANDO_CITA: ["IDLE"],
 };
 
@@ -613,26 +613,98 @@ async function handleText(
 ): Promise<OutgoingMessage[]> {
   await sessionManager.appendUser(sesion.id, msg.text!);
 
-  // Validación específica de teléfono (regex, sin LLM) — más rápido
+  // NUEVO: Siempre intentar LLM primero para texto libre
+  // El LLM es más inteligente que regex para entender intenciones
+  const llmResult = await intentarLLMPrimero(msg, sesion, ctx);
+  
+  // Si el LLM entendió algo (tool call o respuesta con sentido), usar eso
+  if (llmResult) {
+    return llmResult;
+  }
+
+  // FALLBACK: Si LLM no pudo o no entendió, intentar regex como salvavidas
+  logInfo(ctx, "LLM no resolvió, intentando regex fallback");
+
   if (sesion.estado === "PIDIENDO_TELEFONO") {
     const phone = validatePhoneDO(msg.text!);
     if (phone.valid && phone.normalized) {
       return await procesarTelefonoValidado(msg.tenantId, sesion, phone.normalized, ctx);
     }
-    // Si NO es teléfono válido, dejamos que el LLM responda con contexto
   }
 
-  // Validación específica de nombre (regex, sin LLM) — más rápido
   if (sesion.estado === "PIDIENDO_NOMBRE") {
     const val = validateName(msg.text!);
-    if (val.valid && val.apellido) {  // requerir apellido
+    if (val.valid && val.apellido) {
       return await procesarNombreValidado(sesion, val.nombre, val.apellido);
     }
-    // Si solo nombre sin apellido, o nombre inválido, LLM responde
+    if (val.valid && !val.apellido) {
+      // Solo nombre, pedir apellido amablemente
+      return [{ kind: "text", text: `Gracias ${val.nombre} 🙌 ¿Y tu apellido?` }];
+    }
   }
 
-  // Cualquier otro caso: pasar al LLM con contexto del estado
-  return await responderConLLM(msg, sesion, ctx);
+  // ÚLTIMO RECURSO: fallback que NO mata el flujo
+  return await fallbackMantieneEstado(msg.tenantId, sesion);
+}
+
+
+// NUEVO: Intentar resolver con LLM primero
+async function intentarLLMPrimero(
+  msg: IncomingMessage,
+  sesion: SesionConversacion,
+  ctx: LogCtx
+): Promise<OutgoingMessage[] | null> {
+  let datos: DatosTenantParaPrompt;
+  try {
+    datos = await construirDatosTenant(msg.tenantId, sesion);
+  } catch (err) {
+    logError(ctx, "no pude construir datos tenant para LLM", err);
+    return null;
+  }
+
+  const systemPrompt = buildSystemPrompt(
+    { estado: sesion.estado, contexto: sesion.contexto },
+    datos
+  );
+
+  const historial = Array.isArray(sesion.historial) ? sesion.historial : [];
+  const history: LLMTurn[] = historial.slice(-10).map(h => ({
+    role: (h.role === "assistant" ? "assistant" : "user") as "user" | "assistant",
+    content: String(h.content),
+  }));
+
+  const tools = toolsParaEstado(sesion.estado);
+
+  let llmRes;
+  try {
+    llmRes = await callLLM({
+      systemPrompt,
+      history,
+      userMessage: msg.text!,
+      tools,
+      maxTokens: 512,
+    });
+  } catch (err) {
+    if (err instanceof LLMUnavailableError) {
+      logWarn(ctx, "LLM no disponible", { msg: err.message });
+    } else {
+      logError(ctx, "error LLM inesperado", err);
+    }
+    return null;
+  }
+
+  // Procesar tools que llamó el LLM
+  if (llmRes.toolUses.length > 0) {
+    return await procesarToolUses(msg.tenantId, sesion, llmRes.toolUses, ctx);
+  }
+
+  // Sin tools pero con texto útil del LLM
+  if (llmRes.text && llmRes.text.trim().length > 0) {
+    await sessionManager.appendAssistant(sesion.id, llmRes.text);
+    return [{ kind: "text", text: llmRes.text }];
+  }
+
+  return null;
 }
 
 
@@ -728,67 +800,6 @@ async function mostrarCitasDelPaciente(
 
 // ─── LLM como protagonista del texto libre ───────────────────────────
 
-async function responderConLLM(
-  msg: IncomingMessage,
-  sesion: SesionConversacion,
-  ctx: LogCtx
-): Promise<OutgoingMessage[]> {
-  let datos: DatosTenantParaPrompt;
-  try {
-    datos = await construirDatosTenant(msg.tenantId, sesion);
-  } catch (err) {
-    logError(ctx, "no pude construir datos tenant", err);
-    return await fallbackSinLLM(msg.tenantId, sesion);
-  }
-
-  const systemPrompt = buildSystemPrompt(
-    { estado: sesion.estado, contexto: sesion.contexto },
-    datos
-  );
-
-  // Construir historial real (últimos 10 turnos)
-  const historial = Array.isArray(sesion.historial) ? sesion.historial : [];
-  const history: LLMTurn[] = historial.slice(-10).map(h => ({
-    role: (h.role === "assistant" ? "assistant" : "user") as "user" | "assistant",
-    content: String(h.content),
-  }));
-
-  const tools = toolsParaEstado(sesion.estado);
-
-  let llmRes;
-  try {
-    llmRes = await callLLM({
-      systemPrompt,
-      history,
-      userMessage: msg.text!,
-      tools,
-      maxTokens: 512,
-    });
-  } catch (err) {
-    if (err instanceof LLMUnavailableError) {
-      logWarn(ctx, "LLM no disponible, fallback", { msg: err.message });
-    } else {
-      logError(ctx, "error LLM inesperado", err);
-    }
-    return await fallbackSinLLM(msg.tenantId, sesion);
-  }
-
-  // Procesar tools que llamó el LLM
-  if (llmRes.toolUses.length > 0) {
-    return await procesarToolUses(msg.tenantId, sesion, llmRes.toolUses, ctx);
-  }
-
-  // Sin tools, solo texto del LLM
-  if (llmRes.text) {
-    await sessionManager.appendAssistant(sesion.id, llmRes.text);
-    return [{ kind: "text", text: llmRes.text }];
-  }
-
-  // Sin tools ni texto: fallback
-  return await fallbackSinLLM(msg.tenantId, sesion);
-}
-
-
 async function procesarToolUses(
   tenantId: string,
   sesion: SesionConversacion,
@@ -801,7 +812,7 @@ async function procesarToolUses(
     if (result) return result;
   }
   // Ninguna tool produjo resultado válido
-  return await fallbackSinLLM(tenantId, sesion);
+  return await fallbackMantieneEstado(tenantId, sesion);
 }
 
 
@@ -842,6 +853,11 @@ async function procesarUnTool(
       ];
     }
 
+    case "volver_atras": {
+      logInfo(ctx, "LLM solicitó volver_atras");
+      return await volverAtras(sesion, ctx);
+    }
+
     case "extraer_telefono": {
       const raw = String(tu.input["telefono_raw"] ?? "");
       const phone = validatePhoneDO(raw);
@@ -854,7 +870,6 @@ async function procesarUnTool(
       const apellido = String(tu.input["apellido"] ?? "").trim();
       if (!nombre) return null;
       if (!apellido) {
-        // LLM detectó solo nombre — pedirle apellido
         return [{ kind: "text", text: `Gracias ${nombre} 🙌 ¿Y tu apellido?` }];
       }
       return await procesarNombreValidado(sesion, nombre, apellido);
@@ -862,7 +877,6 @@ async function procesarUnTool(
 
     case "sugerir_sede": {
       const sedeId = String(tu.input["sede_id"] ?? "");
-      // sede_id en realidad es profesional_sede_id (ver prompt)
       const ps = await profesionalesRepo.findProfesionalSedeById(sedeId);
       if (!ps) {
         logWarn(ctx, `LLM sugirió sede inválida: ${sedeId}`);
@@ -883,7 +897,6 @@ async function procesarUnTool(
 
     case "sugerir_fecha": {
       const fecha = String(tu.input["fecha_iso"] ?? "");
-      // Validar que sea fecha válida y futura
       const d = new Date(fecha + "T00:00:00");
       if (isNaN(d.getTime())) {
         logWarn(ctx, `LLM sugirió fecha inválida: ${fecha}`);
@@ -901,6 +914,21 @@ async function procesarUnTool(
       return await handleFechaButton(sesion, fecha, ctx);
     }
 
+    case "sugerir_hora": {
+      const hora = String(tu.input["hora_hhmm"] ?? "");
+      if (!/^\d{2}:\d{2}$/.test(hora)) {
+        logWarn(ctx, `LLM sugirió hora inválida: ${hora}`);
+        return null;
+      }
+      // Verificar que haya fecha seleccionada
+      const fechaSeleccionada = sesion.contexto["fecha_seleccionada"] as string | undefined;
+      if (!fechaSeleccionada) {
+        return [{ kind: "text", text: "Primero dime qué día prefieres 📅 y luego la hora." }];
+      }
+      const iniciaEn = `${fechaSeleccionada}T${hora}:00`;
+      return await handleSlotButton(sesion, iniciaEn, ctx);
+    }
+
     default:
       logWarn(ctx, `tool no implementada: ${tu.name}`);
       return null;
@@ -908,19 +936,115 @@ async function procesarUnTool(
 }
 
 
-async function fallbackSinLLM(
+// NUEVO: Volver atrás en el flujo
+async function volverAtras(
+  sesion: SesionConversacion,
+  ctx: LogCtx
+): Promise<OutgoingMessage[]> {
+  const estadoActual = sesion.estado;
+  
+  // Mapa de "a dónde volver" según estado actual
+  const mapaAtras: Record<string, EstadoSesion> = {
+    ELIGIENDO_SERVICIO: "ELIGIENDO_SEDE",
+    ELIGIENDO_HORA: "ELIGIENDO_SERVICIO",
+    PIDIENDO_NOMBRE: "ELIGIENDO_HORA",
+    PIDIENDO_TELEFONO: "PIDIENDO_NOMBRE",
+    ELIGIENDO_TIPO_PAGO: "PIDIENDO_TELEFONO",
+    CONFIRMANDO: "ELIGIENDO_TIPO_PAGO",
+  };
+
+  const estadoAnterior = mapaAtras[estadoActual];
+  if (!estadoAnterior) {
+    // No hay atrás posible, ir a menú
+    const fresh = await sessionManager.resetToIdle(sesion.id);
+    return [await menuPrincipal(sesion.tenant_id, fresh)];
+  }
+
+  // Transicionar al estado anterior (preservando contexto relevante)
+  const fresh = await sessionManager.transitionTo(sesion.id, estadoAnterior, {});
+  
+  // Reconstruir mensaje según el estado al que volvimos
+  switch (estadoAnterior) {
+    case "ELIGIENDO_SEDE": {
+      const profId = fresh.contexto["profesional_id"] as string;
+      const profesional = await profesionalesRepo.findById(profId);
+      const profDisplay = profesional 
+        ? `${profesional.prefijo} ${profesional.nombre} ${profesional.apellido}`
+        : "el doctor";
+      return [{
+        kind: "buttons",
+        text: `Perfecto, volvamos atrás 🙌\n\n${M.eligiendoSede(profDisplay)}`,
+        buttons: (await profesionalesRepo.listarSedesPorProfesional(sesion.tenant_id, profId))
+          .map(s => ({ label: s.sede.nombre, data: `sede:${s.profesionalSede.id}` })),
+      }];
+    }
+    case "ELIGIENDO_SERVICIO": {
+      const psId = fresh.contexto["profesional_sede_id"] as string;
+      const servicios = await profesionalesRepo.listarServiciosPublicos(psId);
+      return [{
+        kind: "list",
+        text: `Listo, elige otro servicio 🙌`,
+        options: servicios.slice(0, 10).map(s => ({
+          label: `${s.nombre} — RD$${s.precio.toLocaleString()}`,
+          description: `${s.duracion_min} min`,
+          data: `servicio:${s.id}`,
+        })),
+      }];
+    }
+    case "ELIGIENDO_HORA": {
+      const servicioNombre = fresh.contexto["servicio_nombre"] as string;
+      const servicioPrecio = fresh.contexto["servicio_precio"] as number;
+      const servicioDuracion = fresh.contexto["servicio_duracion"] as number;
+      return [{
+        kind: "buttons",
+        text: M.eligiendoDia(servicioNombre, servicioPrecio, servicioDuracion),
+        buttons: generarProximosDiasHabiles(5).map(d => ({
+          label: d.label,
+          data: `fecha:${d.iso}`,
+        })),
+      }];
+    }
+    case "PIDIENDO_NOMBRE":
+      return [{ kind: "text", text: `Listo, volvamos atrás 🙌\n\n${M.pidiendoNombre()}` }];
+    case "PIDIENDO_TELEFONO": {
+      const nombre = fresh.contexto["paciente_nombre"] as string;
+      return [{ kind: "text", text: `Perfecto 🙌\n\n${M.pidiendoTelefonoAgenda(nombre)}` }];
+    }
+    case "ELIGIENDO_TIPO_PAGO":
+      return [{
+        kind: "buttons",
+        text: `Listo, elige otra forma de pago 🙌\n\n${M.eligiendoTipoPago()}`,
+        buttons: M.opcionesTipoPago,
+      }];
+    default:
+      return [await menuPrincipal(sesion.tenant_id, fresh)];
+  }
+}
+
+
+// NUEVO: Fallback que mantiene el estado (NO resetea)
+async function fallbackMantieneEstado(
   tenantId: string,
   sesion: SesionConversacion
 ): Promise<OutgoingMessage[]> {
-  // Si está en flujo, mostrar el menú actual del estado
-  if (sesion.estado === "IDLE") {
-    return [await menuPrincipal(tenantId, sesion)];
-  }
-  // En otros estados, recordar al usuario qué se espera
-  return [
-    { kind: "text", text: M.noEntendi() },
-    await menuPrincipal(tenantId, sesion),
-  ];
+  // Mensaje contextual según el estado actual
+  const pistas: Record<string, string> = {
+    IDLE: "¿En qué te puedo ayudar? Toca una opción o escríbeme.",
+    ELIGIENDO_SEDE: "¿En cuál sede te queda mejor? Toca una opción o dime la ciudad.",
+    ELIGIENDO_SERVICIO: "¿Qué servicio necesitas? Toca una opción o dime el nombre.",
+    ELIGIENDO_HORA: "¿Qué día y hora prefieres? Toca un día o escríbeme.",
+    PIDIENDO_NOMBRE: "Necesito tu nombre completo para continuar. ¿Me lo escribes?",
+    PIDIENDO_TELEFONO: "Necesito tu teléfono (10 dígitos, ej: 8094563214).",
+    ELIGIENDO_TIPO_PAGO: "¿Cómo vas a pagar? Toca una opción.",
+    CONFIRMANDO: "Revisa los datos y toca Confirmar o Cancelar.",
+  };
+
+  const pista = pistas[sesion.estado] ?? "¿En qué te puedo ayudar?";
+  
+  return [{
+    kind: "text",
+    text: `Perdona, no entendí bien 😅 ${pista}`,
+  }];
 }
 
 
@@ -937,7 +1061,6 @@ async function construirDatosTenant(
     ? `${profesional.prefijo} ${profesional.nombre} ${profesional.apellido}`
     : "Sin profesional configurado";
 
-  // Sedes para el prompt de ELIGIENDO_SEDE
   let sedesPrompt: Array<{ id: string; nombre: string; ciudad: string }> = [];
   if (profesional) {
     const sedesData = await profesionalesRepo.listarSedesPorProfesional(tenantId, profesional.id);
@@ -948,7 +1071,6 @@ async function construirDatosTenant(
     }));
   }
 
-  // Servicios para el prompt de ELIGIENDO_SERVICIO
   let serviciosPrompt: Array<{ id: string; nombre: string; precio: number; duracion_min: number }> = [];
   const psId = sesion.contexto["profesional_sede_id"] as string | undefined;
   if (psId) {
@@ -960,7 +1082,6 @@ async function construirDatosTenant(
       duracion_min: s.duracion_min,
     }));
   } else if (sedesPrompt.length > 0) {
-    // En IDLE no tenemos psId, pero podemos mostrar servicios de la primera sede
     const servs = await profesionalesRepo.listarServiciosPublicos(sedesPrompt[0].id);
     serviciosPrompt = servs.map(s => ({
       id: s.id,
@@ -1018,7 +1139,6 @@ function generarProximosDiasHabiles(cantidad: number): Array<{ iso: string; labe
 }
 
 function formatFechaDisplay(iso: string): string {
-  // iso es YYYY-MM-DD (sin tiempo). Es naive — usamos directo.
   const [yyyy, mm, dd] = iso.split("-").map(Number);
   const d = new Date(Date.UTC(yyyy, mm - 1, dd));
   const dias = ["domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"];
@@ -1028,8 +1148,6 @@ function formatFechaDisplay(iso: string): string {
 }
 
 function formatFechaHoraDisplay(iso: string): string {
-  // iso es TIMESTAMPTZ con offset. Convertimos a hora DR para display.
-  // Ej: "2026-04-29T16:00:00+00:00" (UTC) → "miércoles 29 de abril, 12:00 PM" (DR)
   const tz = "America/Santo_Domingo";
   const d = new Date(iso);
   if (isNaN(d.getTime())) return iso;
@@ -1046,7 +1164,6 @@ function formatFechaHoraDisplay(iso: string): string {
     minute: "2-digit",
     hour12: true,
   });
-  // Capitalizar y limpiar
   const fechaTxt = fmtFecha.format(d).replace(",", "");
   const horaTxt = fmtHora.format(d).toUpperCase().replace(".", "");
   return `${fechaTxt}, ${horaTxt}`;
