@@ -2,10 +2,10 @@
 // Orquestador interno del flow de agendamiento.
 // Enruta al step correcto según el HandlerKind que viene del dispatcher.
 
-import { profesionalesRepo, tenantsRepo } from "../../../persistence/repositories/index.js";
+import { profesionalesRepo } from "../../../persistence/repositories/index.js";
 import * as M from "../../messages.js";
 import type { FlowContext, FlowResult } from "../../types.js";
-import { logInfo, logWarn } from "../../types.js";
+import { logWarn } from "../../types.js";
 import { fxSend, fxTransition } from "../../effects/runner.js";
 import { verificarCitaActiva } from "./guards/cita-activa.js";
 import { identificarDoctor } from "./steps/01-identificar-doctor.js";
@@ -25,7 +25,7 @@ import type { Tenant } from "../../../persistence/repositories/index.js";
 
 export async function iniciarFlujoAgendar(
   ctx: FlowContext,
-  tenant: Tenant | null,
+  _tenant: Tenant | null,
   forzarNueva = false,
 ): Promise<FlowResult> {
   if (!forzarNueva) {
@@ -190,7 +190,6 @@ export async function handleAgendarCon(
       ctx: ctx.logCtx,
     });
     if (bloqueado) {
-      const c = bloqueado as { buttons?: Array<{ label: string; data: string }> };
       return {
         effects: [fxSend({
           ...(bloqueado as object),
@@ -258,7 +257,7 @@ export async function handleInfoDoctor(ctx: FlowContext, profesionalId: string):
 // ─── buscar_otro ──────────────────────────────────────────────────────
 
 export async function handleBuscarOtro(
-  ctx: FlowContext,
+  _ctx: FlowContext,
   tenant: Tenant | null,
 ): Promise<FlowResult> {
   const asistente = nombreAsistenteDe(tenant);
