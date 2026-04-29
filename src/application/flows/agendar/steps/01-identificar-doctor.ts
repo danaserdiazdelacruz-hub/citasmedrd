@@ -70,11 +70,13 @@ export async function identificarDoctor(
 
   const matches = [...matchesPorTelefono, ...matchesPorExtension, ...matchesPorNombre];
 
-  // 0 matches
+  // 0 matches → devolver null para que el LLM maneje el texto.
+  // El LLM responde naturalmente: si era una reacción ("genial"), la trata como
+  // cortesía; si era un nombre real, explica que no encontró al doctor.
+  // Esto elimina la necesidad de listas de palabras como guardarraíles.
   if (matches.length === 0) {
-    logInfo(logCtx, `identificación sin matches para "${texto}"`);
-    if (texto.length < 4) return null;
-    return { effects: [fxSend({ kind: "text", text: M.doctorNoEncontrado(texto) })] };
+    logInfo(logCtx, `identificación sin matches para "${texto}" → delegando a LLM`);
+    return null;
   }
 
   // 1 match
