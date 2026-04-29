@@ -1,181 +1,171 @@
-# 🏥 CitasMed v3 — Versión consolidada
+# 📦 Semana 1 — Día 1-2: Bot multi-doctor estandarizado
 
-> Esta es la versión definitiva con todos los bloques aplicados.
-> Listo para `npm install && npm run build && npm start`.
-
----
-
-## 📦 Qué incluye este zip
-
-Todo el código actualizado con los bloques 10, 10.1, 11, 12, y 14 ya integrados.
-
-### Bloques aplicados
-
-| # | Nombre | Resumen | Migración SQL |
-|---|--------|---------|---------------|
-| 10 | Funcional | Multi-tenant correcto, timezone, slot re-validation, idempotencia, atomicidad | `migrations/005_sesion_atomic.sql` (recomendada) |
-| 10.1 | Conversacional | El LLM responde texto natural, saludo enriquecido, anti cita doble | — |
-| 11 | María Salud | Identidad estandarizada de la asistente, configurable por tenant | — |
-| 12 | Búsqueda por nombre | El LLM detecta nombres y salta directo a sede | — |
-| 14 | Historial al LLM | El bot recuerda lo conversado dentro de la sesión | — |
+> Primera entrega del plan de 60 días. Sin romper nada existente.
+> 5 archivos modificados + 2 migraciones SQL pequeñas. Build limpio. 70/70 tests pasan.
 
 ---
 
-## 🚀 Cómo deployar
+## ✅ Lo que esta entrega hace
 
-### 1. Descomprimir
+1. **Saludo de CitasMed con disclaimer médico obligatorio** — Spec v1.1 sec 4.2
+2. **FAQ por doctor** (no solo por tenant) — Spec v1.1 sec 3.7
+3. **Deep-link** `/start <slug>` que pre-identifica al doctor — Spec v1.1 sec 4.1
+4. **Validación: cero preguntas sobre motivo de cita** — Spec v1.1 sec 6.3 (ya estaba limpio)
+
+---
+
+## 📁 Archivos en este zip
+
+### Migraciones SQL (correr en orden)
+| Archivo | Acción | Idempotente |
+|---|---|---|
+| `migrations/migration_007_profesional_configuracion.sql` | Agrega `profesionales.configuracion JSONB` | ✅ |
+| `migrations/migration_008_profesional_slug.sql` | Agrega `profesionales.slug TEXT` + índice único + auto-genera slugs para los 11 doctores existentes | ✅ |
+
+### Código TypeScript
+| Archivo | Acción |
+|---|---|
+| `src/channels/core/types.ts` | + campo `commandArg?` para deep-links |
+| `src/channels/telegram/webhook.ts` | Captura el argumento del comando `/start <arg>` |
+| `src/persistence/repositories/profesionales.repo.ts` | + campo `configuracion`, `slug`, método `findBySlug()` |
+| `src/application/messages.ts` | + `DISCLAIMER_MEDICO`, `saludoCitasMedConDoctor()`, `opcionesMenuConDoctor()` |
+| `src/application/orchestrator.ts` | + `faqDelProfesional()` (con fallback a tenant), handler de deep-link en `/start`, `handleInfoDoctorButton` |
+
+---
+
+## 🚀 Pasos para deployar
+
+### Paso 1 — Correr migración 007 en Supabase
+
+Abre Supabase → SQL Editor → pega el contenido de `migrations/migration_007_profesional_configuracion.sql` → Run.
+
+**Salida esperada:**
+```
+total_profesionales: 11
+con_configuracion: 0
+```
+
+### Paso 2 — Correr migración 008
+
+Igual pero con `migrations/migration_008_profesional_slug.sql`.
+
+**Salida esperada:** lista de los 11 doctores con su slug auto-generado:
+- `hairol-pérez` (o `hairol-perez` si no tienes la extensión `unaccent`)
+- `carmen-vargas`
+- `roberto-morales`
+- `patricia-guzmán`
+- ... etc
+
+⚠️ **Si la query falla por `UNACCENT`**, descomenta la versión más simple en el SQL (incluida en el archivo) y vuelve a correr.
+
+### Paso 3 — Reemplazar archivos en el repo
+
+Copia los 5 archivos del zip a sus rutas en el repo.
+
+### Paso 4 — Build y deploy
 
 ```bash
-unzip citasmedrd-v3-completo.zip
-cd citasmedrd-v3
-```
-
-### 2. Aplicar migración SQL (recomendado)
-
-En **Supabase → SQL Editor**, pega y corre:
-
-```
-migrations/005_sesion_atomic.sql
-```
-
-Esto crea funciones que evitan race conditions. Es **idempotente** (seguro re-correr).
-
-> Si NO aplicas la migración, el bot sigue funcionando con un fallback "legacy" que puede perder datos si dos clicks llegan simultáneos.
-
-### 3. Variables de entorno
-
-Copia `.env.example` a `.env` y completa:
-
-```
-ANTHROPIC_API_KEY=sk-ant-...
-ANTHROPIC_MODEL=claude-haiku-4-5-20251001
-SUPABASE_URL=https://...supabase.co
-SUPABASE_SERVICE_ROLE_KEY=...
-SUPABASE_ANON_KEY=...
-TELEGRAM_BOT_TOKEN=...
-CREDENTIALS_ENCRYPTION_KEY=<64 chars hex>
-PORT=8080
-```
-
-### 4. Configurar webhook de Telegram
-
-URL nueva: `/webhook/telegram/<canal_conectado_id>`
-
-El `canal_conectado_id` es el `id` de la fila en la tabla `canales_conectados` de Supabase.
-
-```
-https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://TU-URL/webhook/telegram/<canal_conectado_id>
-```
-
-Telegram debe responder `{"ok":true}`.
-
-### 5. Build y deploy
-
-```bash
-npm install
 npm run build
-npm start
+# commit + push a Railway
 ```
 
-En Railway: push a la rama conectada y deploya automático.
+### Paso 5 — Pruebas
 
----
+#### Prueba 1: saludo nuevo de CitasMed
 
-## 🩺 Identidad de la asistente: María Salud
+Borra la sesión activa en Supabase (tabla `sesiones_conversacion`, busca por `chat_id` y elimina la fila) o usa otro Telegram.
 
-Default global: **"María Salud"**.
+Manda `/start` al bot.
 
-Si algún consultorio quiere otro nombre, en Supabase:
+**Esperado:**
+> 👋 ¡Hola! Bienvenido(a) a *CitasMed*.
+> Soy *María Salud*, tu asistente.
+>
+> ⚠️ Solo te ayudo a *agendar citas* e información del consultorio. *No doy consejos médicos ni atiendo emergencias.* Si tienes una emergencia médica, llama al 911.
+>
+> Para empezar, dime el *nombre, apellido o teléfono* del especialista con quien deseas agendar.
 
-```
-Tabla: tenants
-Columna: configuracion (jsonb)
-Setear: {"asistente_nombre": "Otro Nombre"}
-```
+#### Prueba 2: deep-link
 
-Se lee en cada turn — no requiere reinicio.
+Abre el bot con: `https://t.me/TuBotName?start=carmen-vargas` (ajusta al slug real que veas en la migración 008).
 
----
+**Esperado:**
+> 👋 ¡Hola! Soy *María Salud*, asistente virtual de *CitasMed*.
+>
+> ⚠️ [disclaimer]
+>
+> Vas a gestionar tu cita con *Dra. Carmen Elena Vargas* 🩺 Ginecología Oncológica
+>
+> ¿Qué deseas hacer?
+> [📅 Agendar cita] [📋 Ver mis citas] [❌ Cancelar/Reagendar] [ℹ️ Información]
 
-## 🔍 Búsqueda inteligente de profesional
+Cualquier botón debe arrancar el flujo correspondiente con la Dra. Carmen ya pre-cargada en contexto.
 
-El paciente puede decir cosas naturales como:
+#### Prueba 3: FAQ por doctor (opcional, si quieres validar)
 
-- *"quiero cita con Hairol Pérez"* → va directo a sede
-- *"necesito ver a la doctora María"* → va directo a sede
-- *"cita con Pérez"* (si hay 2 Pérez) → muestra botones para elegir
-- *"ver al Dr. Mendoza"* (no existe) → "no lo encontré" + lista completa
+Configura un FAQ específico para Hairol distinto al del tenant:
 
-Funciona solo en estado `IDLE` y solo cuando la intención es agendar.
-La búsqueda hace `ILIKE` sobre `nombre` y `apellido`, normalizando acentos para el ranking en JS.
-
----
-
-## 🧠 Memoria conversacional
-
-El LLM ahora recibe los últimos 10 turnos sanitizados. Si dices "ese servicio" o "el segundo", el bot entiende la referencia.
-
-La sesión expira a las 24h sin actividad.
-
----
-
-## ✅ Verificación
-
-```bash
-npm install
-npm run build       # ✓ compila limpio
-npm test            # ✓ 47/47 tests pasan
+```sql
+UPDATE profesionales
+SET configuracion = jsonb_build_object(
+  'faq', jsonb_build_object(
+    'tiene_parqueo', false,
+    'atiende_ninos', true,
+    'edad_minima', 0
+  )
+)
+WHERE id = 'c2386b89-6b23-4870-860e-fe47185e93de';  -- Hairol
 ```
 
-Tests incluidos:
-- 19 validators (teléfono RD, nombre, email, cédula)
-- 17 datetime (timezone-aware fechas/horas)
-- 11 historial (sanitización para LLM)
+Pregunta al bot "tienen parqueo?" tras llegar por deep-link de Hairol — debe decir NO (sobreescribe el FAQ del tenant).
 
 ---
 
-## 📂 Estructura del proyecto
+## 🔒 Reglas anti-superposición respetadas
 
-```
-citasmedrd-v3/
-├── BLOQUE_10_FUNCIONAL.md         — detalles del Bloque 10
-├── BLOQUE_10_1_CONVERSACIONAL.md  — detalles del Bloque 10.1
-├── README.md                       — este archivo
-├── migrations/
-│   └── 005_sesion_atomic.sql       — migración SQL (Bloque 10)
-├── src/
-│   ├── application/                — orquestador, LLM, casos de uso
-│   ├── channels/                   — adaptador Telegram
-│   ├── config/                     — env vars
-│   ├── domain/                     — validadores, datetime, historial
-│   └── persistence/                — repositorios Supabase
-└── tests/
-    └── unit/
-        ├── validators.test.ts
-        ├── datetime.test.ts
-        └── historial-llm.test.ts
-```
+- ✋ Cero canibalismo de los flujos existentes (agendar, cancelar, consultar, reagendar siguen idénticos)
+- ✋ FAQ del tenant funciona como FALLBACK si el profesional no tiene FAQ propio (compat retro)
+- ✋ Si alguien viene por `/start` SIN slug, el saludo es el genérico (igual que antes pero con disclaimer)
+- ✋ Todos los UUIDs y datos de los 11 doctores ficticios siguen intactos
+- ✋ Los tests existentes pasan (70/70)
+- ✋ Los Bloques 10-21 anteriores siguen funcionando
 
 ---
 
-## 🔮 Lo que sigue (no incluido aquí)
+## ✔️ Verificación realizada
 
-- **Bloque 12.B** — Búsqueda por extensión telefónica (requiere migración SQL pequeña)
-- **Bloque 13** — Memoria larga del paciente >24h (requiere tabla nueva)
-- **Bloque 15** — Seguridad y cleanup (validación webhook, cifrado, etc.)
-
-Cuando estés listo para uno de esos, avísame.
+- `npm run build` → ✅ compila limpio (sin errores ni warnings)
+- `npm test` → ✅ 70/70 tests pasan
+- Migraciones SQL idempotentes (seguro re-correr)
 
 ---
 
-## ⚠️ Cosas a tener en cuenta
+## 📌 Lo que sigue (Día 3-5 de la Semana 1)
 
-1. **El `update_id` de Telegram tiene cache LRU en memoria** (10 min). Si escalas a 2+ instancias horizontalmente, hay que mover esto a Redis. Mientras corra 1 instancia (Railway por defecto), está bien.
+Cuando esto te funcione, seguimos con:
+- **Día 3:** Endpoints REST de auth (`/api/login`, `/api/login/me`)
+- **Día 4:** Endpoint `/api/bootstrap`
+- **Día 5:** Pruebas + buffer
 
-2. **La sesión vive 24h sin actividad.** Si pasas 24h sin escribir, el bot olvida tu teléfono y nombre.
+NO arranco con eso hasta que confirmes que esta entrega te funciona en producción.
 
-3. **El paciente se identifica por chat_id de Telegram.** Si abre desde otra cuenta, es un desconocido (aunque tenga cita en la DB con su teléfono).
+---
 
-4. **La migración 005 es idempotente.** Puedes correrla cuantas veces quieras sin riesgo.
+## 🐛 Si algo falla
 
-5. **Los logs muestran números de teléfono en cleartext.** Esto se limpia en el Bloque 15 (PII / HIPAA).
+Si después de deployar ves comportamiento raro:
+
+1. **Revisa los logs de Railway** y pásamelos
+2. **Confirma que las 2 migraciones SQL se corrieron**:
+   ```sql
+   SELECT column_name FROM information_schema.columns
+   WHERE table_name='profesionales' AND column_name IN ('configuracion','slug');
+   ```
+   Debe devolver 2 filas.
+3. **Confirma que los slugs se generaron**:
+   ```sql
+   SELECT slug FROM profesionales WHERE tenant_id='9881ce90-c4fe-459c-a5ef-70ab81121232' LIMIT 5;
+   ```
+   No deben ser NULL.
+
+Si hay algún error específico, mándamelo y lo resolvemos antes de avanzar a Día 3.
