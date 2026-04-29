@@ -1108,19 +1108,37 @@ async function handleIdleConLLM(
 
   try {
     const profesionales = await profesionalesRepo.listarActivos(msg.tenantId);
-    const profesionalesResumen = profesionales.slice(0, 5).map(p => ({
+
+    // Cargamos las aseguradoras de cada uno (en paralelo, hasta 5 doctores)
+    const profesionalesParaPrompt = profesionales.slice(0, 5);
+    const aseguradorasPorDoctor = await Promise.all(
+      profesionalesParaPrompt.map(async p => {
+        try {
+          const arr = await profesionalesRepo.listarAseguradorasDeProfesional(p.id);
+          return arr.map(a => a.nombre);
+        } catch {
+          return [] as string[];
+        }
+      })
+    );
+
+    const profesionalesResumen = profesionalesParaPrompt.map((p, i) => ({
       display: `${p.prefijo} ${p.nombre} ${p.apellido}`,
+      especialidad: p.especialidad ?? undefined,
       bio: p.bio_corta,
       anosExperiencia: p.anos_experiencia,
+      whatsapp: p.telefono,
+      aseguradoras: aseguradorasPorDoctor[i],
     }));
 
-    // Sedes con datos completos (dirección, teléfono, ubicación)
+    // Sedes con datos completos (dirección, teléfono, ubicación, extensión)
     let sedesResumen: Array<{
       nombre: string;
       ciudad?: string | null;
       direccion?: string | null;
       telefono?: string | null;
       tieneUbicacion?: boolean;
+      extension?: string | null;
     }> = [];
     // Servicios con precios y duración
     let serviciosResumen: Array<{
@@ -1143,6 +1161,7 @@ async function handleIdleConLLM(
           direccion: s.sede.direccion,
           telefono: s.sede.telefono,
           tieneUbicacion: s.sede.latitud !== null && s.sede.longitud !== null,
+          extension: s.profesionalSede.extension,
         }));
         if (sedes.length > 0) {
           const primeraPS = sedes[0].profesionalSede;

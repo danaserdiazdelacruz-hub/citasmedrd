@@ -14,6 +14,10 @@ export interface Profesional {
   bio_corta: string | null;
   foto_url: string | null;
   anos_experiencia: number | null;
+  /** Especialidad médica (ej: "Ginecología Oncológica"). Opcional. */
+  especialidad: string | null;
+  /** WhatsApp directo del doctor (NO el de la sede). Opcional. */
+  telefono: string | null;
   activo: boolean;
 }
 
@@ -40,6 +44,8 @@ export interface ProfesionalSede {
   buffer_entre_citas_min: number;
   ventana_cancel_gratis_horas: number;
   max_dias_reserva_adelanto: number;
+  /** Extensión telefónica del doctor en esa sede (ej: "1012"). Opcional. */
+  extension: string | null;
   activo: boolean;
 }
 
@@ -76,7 +82,7 @@ class ProfesionalesRepo {
     const db = getDb();
     const { data, error } = await db
       .from("profesionales")
-      .select("id, tenant_id, prefijo, nombre, apellido, bio_corta, foto_url, anos_experiencia, activo")
+      .select("id, tenant_id, prefijo, nombre, apellido, bio_corta, foto_url, anos_experiencia, especialidad, telefono, activo")
       .eq("tenant_id", tenantId)
       .eq("activo", true)
       .is("deleted_at", null)
@@ -90,7 +96,7 @@ class ProfesionalesRepo {
     const db = getDb();
     const { data, error } = await db
       .from("profesionales")
-      .select("id, tenant_id, prefijo, nombre, apellido, bio_corta, foto_url, anos_experiencia, activo")
+      .select("id, tenant_id, prefijo, nombre, apellido, bio_corta, foto_url, anos_experiencia, especialidad, telefono, activo")
       .eq("tenant_id", tenantId)
       .eq("id", profesionalId)
       .is("deleted_at", null)
@@ -110,7 +116,8 @@ class ProfesionalesRepo {
       .from("profesional_sede")
       .select(`
         id, tenant_id, profesional_id, sede_id, slot_min, cupos_por_slot,
-        buffer_entre_citas_min, ventana_cancel_gratis_horas, max_dias_reserva_adelanto, activo,
+        buffer_entre_citas_min, ventana_cancel_gratis_horas, max_dias_reserva_adelanto,
+        extension, activo,
         sedes!inner (
           id, tenant_id, nombre, direccion, ciudad, telefono, latitud, longitud, timezone, activo
         )
@@ -129,6 +136,7 @@ class ProfesionalesRepo {
         buffer_entre_citas_min: r.buffer_entre_citas_min,
         ventana_cancel_gratis_horas: r.ventana_cancel_gratis_horas,
         max_dias_reserva_adelanto: r.max_dias_reserva_adelanto,
+        extension: r.extension,
         activo: r.activo,
       },
       sede: r.sedes,
@@ -192,6 +200,37 @@ class ProfesionalesRepo {
   }
 
   /**
+   * Aseguradoras que un profesional acepta.
+   * Devuelve solo las relaciones con `acepta = true`, ordenadas por nombre.
+   * Si la tabla `profesional_aseguradora` no existe (DB vieja) o falla, devuelve [].
+   */
+  async listarAseguradorasDeProfesional(
+    profesionalId: string,
+  ): Promise<Array<{ nombre: string; codigo: string }>> {
+    const db = getDb();
+    const { data, error } = await db
+      .from("profesional_aseguradora")
+      .select(`
+        acepta,
+        aseguradoras!inner ( nombre, codigo, activo )
+      `)
+      .eq("profesional_id", profesionalId)
+      .eq("acepta", true);
+
+    if (error) {
+      // No tirar — si la tabla no existe en una DB vieja, devolvemos vacío
+      console.warn(`[profesionales] listarAseguradorasDeProfesional falló: ${error.message}`);
+      return [];
+    }
+
+    type Row = { acepta: boolean; aseguradoras: { nombre: string; codigo: string; activo: boolean } };
+    return ((data ?? []) as unknown as Row[])
+      .filter(r => r.aseguradoras.activo)
+      .map(r => ({ nombre: r.aseguradoras.nombre, codigo: r.aseguradoras.codigo }))
+      .sort((a, b) => a.nombre.localeCompare(b.nombre));
+  }
+
+  /**
    * Busca profesionales por nombre/apellido del query del paciente.
    * Casos típicos:
    *   - "Hairol Pérez"  → match en nombre Y apellido
@@ -238,7 +277,7 @@ class ProfesionalesRepo {
 
     const { data, error } = await db
       .from("profesionales")
-      .select("id, tenant_id, prefijo, nombre, apellido, bio_corta, foto_url, anos_experiencia, activo")
+      .select("id, tenant_id, prefijo, nombre, apellido, bio_corta, foto_url, anos_experiencia, especialidad, telefono, activo")
       .eq("tenant_id", tenantId)
       .eq("activo", true)
       .is("deleted_at", null)

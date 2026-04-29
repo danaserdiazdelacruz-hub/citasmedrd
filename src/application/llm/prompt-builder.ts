@@ -19,6 +19,10 @@ export interface ProfesionalResumen {
   bio?: string | null;
   /** Años de experiencia si está registrado. */
   anosExperiencia?: number | null;
+  /** WhatsApp directo del doctor (NO la sede). */
+  whatsapp?: string | null;
+  /** Lista de aseguradoras que acepta (formato: ["SENASA", "MAPFRE"]). */
+  aseguradoras?: string[];
 }
 
 export interface SedeResumen {
@@ -30,6 +34,8 @@ export interface SedeResumen {
   telefono?: string | null;
   /** Si la sede tiene coordenadas, podemos ofrecer enviar ubicación. */
   tieneUbicacion?: boolean;
+  /** Extensión telefónica del doctor en esta sede específica. */
+  extension?: string | null;
 }
 
 export interface ServicioResumen {
@@ -114,6 +120,10 @@ export function buildSystemPrompt(ctx: PromptContext): string {
         }
         let linea = partes.join(" ");
         if (p.bio) linea += `\n   ${p.bio}`;
+        if (p.whatsapp) linea += `\n   📱 WhatsApp directo: ${p.whatsapp}`;
+        if (p.aseguradoras && p.aseguradoras.length > 0) {
+          linea += `\n   💳 Acepta: ${p.aseguradoras.join(", ")}`;
+        }
         return linea;
       }).join("\n");
 
@@ -125,7 +135,12 @@ export function buildSystemPrompt(ctx: PromptContext): string {
         if (s.ciudad) partes.push(`(${s.ciudad})`);
         let linea = partes.join(" ");
         if (s.direccion) linea += `\n   📍 ${s.direccion}`;
-        if (s.telefono) linea += `\n   ☎️ ${s.telefono}`;
+        if (s.telefono) {
+          const ext = s.extension ? ` Ext. ${s.extension}` : "";
+          linea += `\n   ☎️ ${s.telefono}${ext}`;
+        } else if (s.extension) {
+          linea += `\n   ☎️ Ext. ${s.extension}`;
+        }
         if (s.tieneUbicacion) linea += `\n   📌 Puedes ofrecer enviar la ubicación si te la piden`;
         return linea;
       }).join("\n");
