@@ -35,6 +35,7 @@ export interface CitaActivaResumen {
   servicio: string;
   fechaHora: string;
   codigo: string;
+  doctor?: string;
 }
 
 export interface FAQTenant {
@@ -168,10 +169,10 @@ export function buildSystemPrompt(ctx: PromptContext): string {
 
   const citaActivaTexto = ctx.citaActiva
     ? `\nIMPORTANTE — EL PACIENTE TIENE UNA CITA ACTIVA:
-- Servicio: ${ctx.citaActiva.servicio}
-- Fecha/Hora: ${ctx.citaActiva.fechaHora}
 - Código: ${ctx.citaActiva.codigo}
-Si pregunta por "su cita", refiérete a esta. Si quiere agendar OTRA, confirma si quiere reagendar o agendar adicional.`
+- Servicio: ${ctx.citaActiva.servicio}
+- Fecha/Hora: ${ctx.citaActiva.fechaHora}${ctx.citaActiva.doctor ? `\n- Doctor: ${ctx.citaActiva.doctor}` : ""}
+Si pregunta por "su cita" o "con quién tiene cita", usa estos datos. Si quiere agendar OTRA, confirma si quiere reagendar o agendar adicional.`
     : "";
 
   return `Eres *${nombreAsistente}*, la asistente virtual de "${ctx.nombreClinica}" (${tipoTexto}). Ayudas a pacientes a gestionar sus citas y respondes preguntas sobre el ${tipoTexto}.
