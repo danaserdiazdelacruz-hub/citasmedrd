@@ -33,6 +33,7 @@ export async function mostrarCitasCancelar(
     codigo: c.codigo,
     fechaHora: formatFechaHora(c.iniciaEn, ctx.logCtx.tz),
     servicio: c.servicioNombre,
+    doctor: `${c.profesionalNombre} ${c.profesionalApellido}`.trim(),
   }));
 
   return {
