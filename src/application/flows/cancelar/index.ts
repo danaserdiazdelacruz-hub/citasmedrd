@@ -1,5 +1,7 @@
 // src/application/flows/cancelar/index.ts
-import { consultarCitasActivasPorTelefono, cancelarCita } from "../../use-cases/index.js";
+// Cancelar citas: primero por código, luego por teléfono como fallback.
+
+import { consultarCitasActivasPorTelefono, consultarCitaPorCodigo, cancelarCita } from "../../use-cases/index.js";
 import { formatFechaHora } from "../../../domain/datetime.js";
 import { DomainError } from "../../../domain/errors.js";
 import * as M from "../../messages.js";
@@ -7,7 +9,41 @@ import type { FlowContext, FlowResult } from "../../types.js";
 import { logInfo, logError } from "../../types.js";
 import { fxSend, fxTransition, fxReset } from "../../effects/runner.js";
 
-export async function mostrarCitasCancelar(
+export async function mostrarCitasCancelarPorCodigo(
+  ctx: FlowContext,
+  codigo: string,
+): Promise<FlowResult> {
+  const cita = await consultarCitaPorCodigo(ctx.tenantId, codigo.toUpperCase());
+
+  if (!cita || !["pendiente", "confirmada"].includes(cita.estado)) {
+    return {
+      effects: [fxSend({
+        kind: "buttons",
+        text: `No encontré una cita activa con el código *${codigo.toUpperCase()}*. Verifica el código o escribe tu teléfono.`,
+        buttons: [{ label: "🏠 Volver al menú", data: "menu:inicio" }],
+      })],
+    };
+  }
+
+  const doctor = `${cita.profesionalNombre} ${cita.profesionalApellido}`.trim();
+  return {
+    effects: [
+      fxTransition(ctx.sesionId, "CANCELANDO_CITA", {}),
+      fxSend({
+        kind: "buttons",
+        text: M.citasActivasResumen([{
+          codigo: cita.codigo,
+          fechaHora: formatFechaHora(cita.iniciaEn, ctx.logCtx.tz),
+          servicio: cita.servicioNombre,
+          doctor,
+        }]) + M.eligeCitaCancelar(),
+        buttons: [{ label: `❌ Cancelar ${cita.codigo}`, data: `cancelar_cita:${cita.id}` }],
+      }),
+    ],
+  };
+}
+
+export async function mostrarCitasCancelarPorTelefono(
   ctx: FlowContext,
   telefono: string,
 ): Promise<FlowResult> {
@@ -51,11 +87,14 @@ export async function mostrarCitasCancelar(
   };
 }
 
-export async function pedirTelefonoCancelar(ctx: FlowContext): Promise<FlowResult> {
+export async function pedirCodigoOTelefonoCancelar(ctx: FlowContext): Promise<FlowResult> {
   return {
     effects: [
       fxTransition(ctx.sesionId, "PIDIENDO_TELEFONO", { intencion: "cancelar" }),
-      fxSend({ kind: "text", text: M.pidiendoTelefonoCancelar() }),
+      fxSend({
+        kind: "text",
+        text: "¿Cuál es el código de la cita que deseas cancelar? (ej: *CITA-ABC123*)\nSi no lo tienes, escribe tu número de teléfono.",
+      }),
     ],
   };
 }
