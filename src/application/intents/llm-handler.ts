@@ -104,7 +104,7 @@ export async function handleLLM(input: LLMHandlerInput): Promise<LLMHandlerResul
       }
     }
 
-    let citaActivaResumen: { servicio: string; fechaHora: string; codigo: string } | undefined;
+    let citaActivaResumen: { servicio: string; fechaHora: string; codigo: string; doctor?: string } | undefined;
     const telConocido = sesion.contexto["paciente_telefono_conocido"] as string | undefined;
     if (telConocido) {
       try {
@@ -115,6 +115,7 @@ export async function handleLLM(input: LLMHandlerInput): Promise<LLMHandlerResul
             servicio: c.servicioNombre,
             fechaHora: formatFechaHora(c.iniciaEn, ctx.logCtx.tz),
             codigo: c.codigo,
+            doctor: `${c.profesionalNombre} ${c.profesionalApellido}`.trim(),
           };
         }
       } catch { /* no crítico */ }
