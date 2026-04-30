@@ -17,6 +17,7 @@ export interface CitaDetalle {
   pacienteNombre: string;
   pacienteApellido: string;
   pacienteTelefono: string;
+  profesionalId: string;
   profesionalNombre: string;
   profesionalApellido: string;
   sedeNombre: string;
@@ -34,7 +35,7 @@ export async function consultarCitaPorCodigo(
       id, codigo, estado, inicia_en, duracion_min, precio_cobrado, moneda, motivo_visita,
       pacientes!inner ( nombre, apellido, telefono ),
       profesional_sede!inner (
-        profesionales!inner ( nombre, apellido ),
+        profesionales!inner ( id, nombre, apellido ),
         sedes!inner ( nombre )
       ),
       servicios!inner ( nombre )
@@ -59,7 +60,7 @@ export async function consultarCitaPorCodigo(
     motivo_visita: string | null;
     pacientes: { nombre: string; apellido: string; telefono: string };
     profesional_sede: {
-      profesionales: { nombre: string; apellido: string };
+      profesionales: { id: string; nombre: string; apellido: string };
       sedes: { nombre: string };
     };
     servicios: { nombre: string };
@@ -77,6 +78,7 @@ export async function consultarCitaPorCodigo(
     pacienteNombre: row.pacientes.nombre,
     pacienteApellido: row.pacientes.apellido,
     pacienteTelefono: row.pacientes.telefono,
+    profesionalId: row.profesional_sede.profesionales.id,
     profesionalNombre: row.profesional_sede.profesionales.nombre,
     profesionalApellido: row.profesional_sede.profesionales.apellido,
     sedeNombre: row.profesional_sede.sedes.nombre,
@@ -95,7 +97,7 @@ export async function consultarCitasActivasPorTelefono(
       id, codigo, estado, inicia_en, duracion_min, precio_cobrado, moneda, motivo_visita,
       pacientes!inner ( nombre, apellido, telefono ),
       profesional_sede!inner (
-        profesionales!inner ( nombre, apellido ),
+        profesionales!inner ( id, nombre, apellido ),
         sedes!inner ( nombre )
       ),
       servicios!inner ( nombre )
@@ -120,7 +122,7 @@ export async function consultarCitasActivasPorTelefono(
     motivo_visita: string | null;
     pacientes: { nombre: string; apellido: string; telefono: string };
     profesional_sede: {
-      profesionales: { nombre: string; apellido: string };
+      profesionales: { id: string; nombre: string; apellido: string };
       sedes: { nombre: string };
     };
     servicios: { nombre: string };
@@ -138,6 +140,7 @@ export async function consultarCitasActivasPorTelefono(
     pacienteNombre: row.pacientes.nombre,
     pacienteApellido: row.pacientes.apellido,
     pacienteTelefono: row.pacientes.telefono,
+    profesionalId: row.profesional_sede.profesionales.id,
     profesionalNombre: row.profesional_sede.profesionales.nombre,
     profesionalApellido: row.profesional_sede.profesionales.apellido,
     sedeNombre: row.profesional_sede.sedes.nombre,
