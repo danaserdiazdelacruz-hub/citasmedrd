@@ -348,10 +348,12 @@ export function sinCitasActivas(): string {
   ]);
 }
 
-export function citasActivasResumen(citas: Array<{ codigo: string; fechaHora: string; servicio: string }>): string {
-  const lineas = citas.map(c =>
-    `• *${c.codigo}*\n  📅 ${c.fechaHora}\n  🏥 ${c.servicio}`
-  ).join("\n\n");
+export function citasActivasResumen(citas: Array<{ codigo: string; fechaHora: string; servicio: string; doctor?: string }>): string {
+  const lineas = citas.map(c => {
+    let linea = `• *${c.codigo}*\n  📅 ${c.fechaHora}\n  🏥 ${c.servicio}`;
+    if (c.doctor) linea += `\n  👨‍⚕️ ${c.doctor}`;
+    return linea;
+  }).join("\n\n");
   return `Estas son tus citas activas:\n\n${lineas}`;
 }
 
