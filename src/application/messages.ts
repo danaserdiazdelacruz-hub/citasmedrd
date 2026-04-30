@@ -140,10 +140,11 @@ export const opcionesMenuConCitaPendiente = [
 ];
 
 /** Cuando el usuario quiere agendar pero ya tiene una cita activa. */
-export function yaTienesCitaActiva(fechaHora: string, servicio: string, codigo: string): string {
+export function yaTienesCitaActiva(fechaHora: string, servicio: string, codigo: string, doctor?: string): string {
+  const doctorLinea = doctor ? `\n👨‍⚕️ ${doctor}` : "";
   return pick([
-    `Antes de agendar otra: ya tienes una cita activa.\n\n📅 *${servicio}*\n🕒 ${fechaHora}\n🎫 ${codigo}\n\n¿Quieres reagendar esa o agendar una adicional?`,
-    `Ojo 👀 Ya tienes una cita registrada:\n\n📅 *${servicio}* — ${fechaHora}\n🎫 ${codigo}\n\n¿Es esa la que querías o necesitas otra cita más?`,
+    `Antes de agendar otra: ya tienes una cita activa.\n\n📅 *${servicio}*\n🕒 ${fechaHora}${doctorLinea}\n🎫 ${codigo}\n\n¿Quieres reagendar esa o agendar una adicional?`,
+    `Ojo 👀 Ya tienes una cita registrada:\n\n📅 *${servicio}* — ${fechaHora}${doctorLinea}\n🎫 ${codigo}\n\n¿Es esa la que querías o necesitas otra cita más?`,
   ]);
 }
 
@@ -305,20 +306,7 @@ export const opcionesConfirmacion = [
 // ─── Cita confirmada ─────────────────────────────────────────────────
 
 export function citaConfirmada(codigo: string): string {
-  return pick([
-    `🎉 ¡Listo! Tu cita está confirmada\n\n` +
-      `Código: *${codigo}*\n\n` +
-      `Guarda este código por si necesitas consultarla o cambiarla luego.\n\n` +
-      `_Para volver al menú: /start_`,
-    `✅ ¡Cita confirmada!\n\n` +
-      `Tu código es *${codigo}*\n\n` +
-      `Guárdalo bien — te servirá si necesitas modificar o cancelar la cita.\n\n` +
-      `_Para volver al menú: /start_`,
-    `🙌 Todo listo, tu cita quedó agendada\n\n` +
-      `Código: *${codigo}*\n\n` +
-      `Ese código es importante para futuras consultas. ¡Te esperamos!\n\n` +
-      `_Para volver al menú: /start_`,
-  ]);
+  return `✅ ¡Cita confirmada!\n\n🎫 *${codigo}*\n\n_Guarda ese número — es tu referencia para consultar o cancelar._`;
 }
 
 // ─── Errores con propósito (no genéricos) ────────────────────────────
