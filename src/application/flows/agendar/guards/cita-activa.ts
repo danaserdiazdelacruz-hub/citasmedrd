@@ -1,10 +1,7 @@
 // src/application/flows/agendar/guards/cita-activa.ts
-// Verificación de cita activa del paciente.
-// ÚNICA fuente de verdad — extraída de las 3 duplicaciones en el orquestador anterior.
-//
-// Si el paciente ya tiene cita activa y no se fuerza nueva, devuelve el
-// OutgoingMessage de "ya tienes cita". Si no hay cita activa (o no hay teléfono
-// conocido), devuelve null → el flujo continúa normal.
+// Verifica si el paciente ya tiene cita activa CON EL MISMO PROFESIONAL.
+// Con profesional distinto devuelve null → flujo continúa libre.
+// Única fuente de verdad para esta regla de negocio.
 
 import { consultarCitasActivasPorTelefono } from "../../../use-cases/index.js";
 import { formatFechaHora } from "../../../../domain/datetime.js";
@@ -18,12 +15,14 @@ export interface CitaActivaInput {
   telefonoConocido: string | undefined;
   tz: string;
   ctx: LogCtx;
+  /** Si se provee, solo bloquea si hay cita activa con este profesional_id. */
+  profesionalId?: string;
 }
 
 export async function verificarCitaActiva(
   input: CitaActivaInput,
 ): Promise<OutgoingMessage | null> {
-  const { tenantId, telefonoConocido, tz, ctx } = input;
+  const { tenantId, telefonoConocido, tz, ctx, profesionalId } = input;
 
   if (!telefonoConocido) return null;
 
@@ -31,8 +30,16 @@ export async function verificarCitaActiva(
     const citas = await consultarCitasActivasPorTelefono(tenantId, telefonoConocido);
     if (citas.length === 0) return null;
 
-    const c = citas[0];
-    logInfo(ctx, "paciente ya tiene cita activa, ofreciendo opciones", { codigo: c.codigo });
+    // Con profesional distinto: citas independientes, no bloquear.
+    const relevantes = profesionalId
+      ? citas.filter(c => c.profesionalId === profesionalId)
+      : citas;
+
+    if (relevantes.length === 0) return null;
+
+    const c = relevantes[0];
+    const doctor = `${c.profesionalNombre} ${c.profesionalApellido}`.trim();
+    logInfo(ctx, "cita activa con mismo profesional", { codigo: c.codigo, doctor });
 
     return {
       kind: "buttons",
@@ -40,6 +47,7 @@ export async function verificarCitaActiva(
         formatFechaHora(c.iniciaEn, tz),
         c.servicioNombre,
         c.codigo,
+        doctor,
       ),
       buttons: M.opcionesYaTieneCita,
     };
